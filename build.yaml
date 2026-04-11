@@ -1,0 +1,19 @@
+---
+name: "Screenshot Capture"
+guid: "a3c9f1d2-4b7e-4f8a-9d0c-1e2b3a4c5d6e"
+version: "1.0.0.0"
+targetAbi: "10.11.0.0"
+framework: "net9.0"
+overview: "Adds a screenshot button to the video player OSD. Captures the current frame via FFmpeg and downloads it as JPEG."
+description: >
+  Provides a native screenshot capture button in the Jellyfin video player.
+  When clicked, the current playback position is sent to the server, which
+  uses FFmpeg to extract the exact frame from the source file and returns it
+  as a JPEG image download. No client-side canvas compression — pixel-perfect
+  frame from the original media.
+category: "General"
+owner: ""
+artifacts:
+- "Jellyfin.Plugin.Screenshot.dll"
+changelog: >
+  1.0.0: Initial release — OSD camera button, server-side FFmpeg frame extraction.

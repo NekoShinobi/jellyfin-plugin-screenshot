@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Screenshot Capture</title>
+</head>
+<body>
+    <div id="ScreenshotCaptureConfigPage"
+         data-role="page"
+         class="page type-interior pluginConfigurationPage"
+         data-require="emby-button">
+        <div data-role="content">
+            <div class="content-primary">
+                <h2>Screenshot Capture</h2>
+                <p>
+                    Adds a <span class="material-icons" style="vertical-align:middle;font-size:1em">photo_camera</span>
+                    button to the video player OSD. Clicking it sends the current playback position to the
+                    Jellyfin server, which extracts the exact frame via FFmpeg and returns it as a JPEG download.
+                </p>
+                <p>No configuration required. The button appears automatically when playing a video.</p>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

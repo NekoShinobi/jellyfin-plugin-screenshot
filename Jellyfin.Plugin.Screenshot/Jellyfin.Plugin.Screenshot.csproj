@@ -1,0 +1,81 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <RootNamespace>Jellyfin.Plugin.Screenshot</RootNamespace>
+    <AssemblyName>Jellyfin.Plugin.Screenshot</AssemblyName>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Jellyfin.Controller" Version="10.11.0">
+      <ExcludeAssets>runtime</ExcludeAssets>
+    </PackageReference>
+    <PackageReference Include="Jellyfin.Model" Version="10.11.0">
+      <ExcludeAssets>runtime</ExcludeAssets>
+    </PackageReference>
+    <PackageReference Include="Microsoft.AspNetCore.Mvc" Version="2.2.0">
+      <ExcludeAssets>runtime</ExcludeAssets>
+    </PackageReference>
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Remove="Configuration\configPage.html" />
+    <EmbeddedResource Include="Configuration\configPage.html" />
+    <None Remove="js\screenshot.js" />
+    <EmbeddedResource Include="js\screenshot.js" />
+  </ItemGroup>
+
+  <!-- Plugin packaging: create {Name}_{Version}/ folder with DLL + meta.json -->
+  <PropertyGroup>
+    <PluginDisplayName>Screenshot Capture</PluginDisplayName>
+    <PluginGuid>a3c9f1d2-4b7e-4f8a-9d0c-1e2b3a4c5d6e</PluginGuid>
+    <PluginTargetAbi>10.11.0.0</PluginTargetAbi>
+    <PluginCategory>General</PluginCategory>
+    <PluginOverview>Adds a screenshot button to the video player OSD. Captures the current frame via FFmpeg and downloads it as JPEG.</PluginOverview>
+    <PluginDescription>Provides a native screenshot capture button in the Jellyfin video player. When clicked, the server extracts the exact frame from the source file using FFmpeg and returns it as a JPEG download.</PluginDescription>
+    <PluginChangelog>1.0.0: Initial release.</PluginChangelog>
+    <PluginOwner></PluginOwner>
+    <PluginPackageDir>$(OutputPath)$(PluginDisplayName)_$(Version)</PluginPackageDir>
+  </PropertyGroup>
+
+  <Target Name="PackagePlugin" AfterTargets="Build">
+    <PropertyGroup>
+      <_Timestamp>$([System.DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"))</_Timestamp>
+      <_MetaJson>{
+  "category": "$(PluginCategory)",
+  "changelog": "$(PluginChangelog)",
+  "description": "$(PluginDescription)",
+  "guid": "$(PluginGuid)",
+  "imageUrl": "",
+  "name": "$(PluginDisplayName)",
+  "overview": "$(PluginOverview)",
+  "owner": "$(PluginOwner)",
+  "targetAbi": "$(PluginTargetAbi)",
+  "timestamp": "$(_Timestamp)",
+  "version": "$(Version)"
+}</_MetaJson>
+    </PropertyGroup>
+
+    <MakeDir Directories="$(PluginPackageDir)" />
+
+    <WriteLinesToFile
+      File="$(PluginPackageDir)/meta.json"
+      Lines="$(_MetaJson)"
+      Overwrite="true"
+      WriteOnlyWhenDifferent="true" />
+
+    <Copy
+      SourceFiles="$(OutputPath)$(AssemblyName).dll"
+      DestinationFolder="$(PluginPackageDir)"
+      SkipUnchangedFiles="true" />
+
+    <Message Importance="high" Text="Plugin packaged → $(PluginPackageDir)" />
+  </Target>
+
+</Project>
