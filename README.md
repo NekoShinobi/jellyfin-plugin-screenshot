@@ -10,7 +10,7 @@ Adds a camera button to the Jellyfin video player OSD. On click, the server extr
 
 ## Desktop Client
 
-Requires a patched build of [jellyfin-desktop](https://github.com/NekoShinobi/jellyfin-desktop) which adds `CefDownloadHandler` support. Without it, downloads will not work in the desktop client.
+Should work with [jellyfin-desktop](https://github.com/jellyfin/jellyfin-desktop) w/ latest version.
 
 ## Installation
 
