@@ -12,7 +12,7 @@ description: >
   as a JPEG image download. No client-side canvas compression — pixel-perfect
   frame from the original media.
 category: "General"
-owner: ""
+owner: "NekoShinobi"
 artifacts:
 - "Jellyfin.Plugin.Screenshot.dll"
 changelog: >

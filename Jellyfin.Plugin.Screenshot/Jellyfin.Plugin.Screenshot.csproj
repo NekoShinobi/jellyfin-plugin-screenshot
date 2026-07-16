@@ -40,7 +40,7 @@
     <PluginOverview>Adds a screenshot button to the video player OSD. Captures the current frame via FFmpeg and downloads it as JPEG.</PluginOverview>
     <PluginDescription>Provides a native screenshot capture button in the Jellyfin video player. When clicked, the server extracts the exact frame from the source file using FFmpeg and returns it as a JPEG download.</PluginDescription>
     <PluginChangelog>1.0.0: Initial release.</PluginChangelog>
-    <PluginOwner></PluginOwner>
+    <PluginOwner>NekoShinobi</PluginOwner>
     <PluginPackageDir>$(OutputPath)$(PluginDisplayName)_$(Version)</PluginPackageDir>
   </PropertyGroup>
 

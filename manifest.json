@@ -1,0 +1,12 @@
+[
+  {
+    "name": "Screenshot Capture",
+    "guid": "a3c9f1d2-4b7e-4f8a-9d0c-1e2b3a4c5d6e",
+    "description": "Provides a native screenshot capture button in the Jellyfin video player. When clicked, the server extracts the exact frame from the source file using FFmpeg and returns it as a JPEG download.",
+    "overview": "Adds a screenshot button to the video player OSD and captures the current frame with FFmpeg.",
+    "owner": "NekoShinobi",
+    "category": "General",
+    "imageUrl": "",
+    "versions": []
+  }
+]

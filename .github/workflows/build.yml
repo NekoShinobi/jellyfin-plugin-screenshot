@@ -1,33 +1,181 @@
-name: Build
+name: Build and release
 
 on:
   push:
     branches: [main]
-    tags: ['v*']
   pull_request:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      changelog:
+        description: Release notes for the GitHub release and Jellyfin manifest
+        required: true
+        type: string
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   build:
+    name: Build plugin
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out repository
+        uses: actions/checkout@v4
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '9.0.x'
 
-      - name: Restore
+      - name: Calculate build version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          base_version="$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' Directory.Build.props | head -n 1)"
+          if [[ ! "$base_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Directory.Build.props must contain a four-part numeric Version." >&2
+            exit 1
+          fi
+
+          version="${base_version%.*}.${GITHUB_RUN_NUMBER}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Building Screenshot Capture $version"
+
+      - name: Restore dependencies
         run: dotnet restore
 
       - name: Build
-        run: dotnet build -c Release --no-restore
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          dotnet build -c Release --no-restore \
+            -p:Version="$VERSION" \
+            -p:AssemblyVersion="$VERSION" \
+            -p:FileVersion="$VERSION" \
+            -p:PluginPackageDir="$RUNNER_TEMP/plugin"
 
-      - name: Upload artifact
+      - name: Create release archive
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          archive="Jellyfin.Plugin.Screenshot_${VERSION}.zip"
+          test -f "$RUNNER_TEMP/plugin/Jellyfin.Plugin.Screenshot.dll"
+          test -f "$RUNNER_TEMP/plugin/meta.json"
+
+          mkdir -p dist
+          (cd "$RUNNER_TEMP/plugin" && zip -r "$GITHUB_WORKSPACE/dist/$archive" .)
+          checksum="$(md5sum "dist/$archive" | cut -d ' ' -f 1 | tr '[:lower:]' '[:upper:]')"
+          printf '%s  %s\n' "$checksum" "$archive" > "dist/$archive.md5"
+
+      - name: Upload release artifact
         uses: actions/upload-artifact@v4
         with:
-          name: screenshot-capture-plugin
-          path: 'Jellyfin.Plugin.Screenshot/Screenshot Capture_*/'
+          name: screenshot-capture-${{ steps.version.outputs.version }}
+          path: dist/
           if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Publish release
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Download release artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: screenshot-capture-${{ needs.build.outputs.version }}
+          path: dist
+
+      - name: Create GitHub release
+        env:
+          CHANGELOG: ${{ inputs.changelog }}
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          archive="Jellyfin.Plugin.Screenshot_${VERSION}.zip"
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            gh release upload "$VERSION" "dist/$archive" "dist/$archive.md5" --clobber
+            gh release edit "$VERSION" --title "$VERSION" --notes "$CHANGELOG"
+          else
+            gh release create "$VERSION" \
+              "dist/$archive" \
+              "dist/$archive.md5" \
+              --target "$GITHUB_SHA" \
+              --title "$VERSION" \
+              --notes "$CHANGELOG"
+          fi
+
+      - name: Add release to plugin manifest
+        env:
+          CHANGELOG: ${{ inputs.changelog }}
+          VERSION: ${{ needs.build.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          archive="Jellyfin.Plugin.Screenshot_${VERSION}.zip"
+          checksum="$(cut -d ' ' -f 1 "dist/$archive.md5")"
+          source_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${VERSION}/${archive}"
+          timestamp="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+          updated_manifest="$(mktemp)"
+
+          jq \
+            --arg version "$VERSION" \
+            --arg checksum "$checksum" \
+            --arg sourceUrl "$source_url" \
+            --arg timestamp "$timestamp" \
+            --arg changelog "$CHANGELOG" \
+            '.[0].versions |= ([{
+              changelog: $changelog,
+              targetAbi: "10.11.0.0",
+              version: $version,
+              sourceUrl: $sourceUrl,
+              checksum: $checksum,
+              timestamp: $timestamp
+            }] + map(select(.version != $version)))' \
+            manifest.json > "$updated_manifest"
+
+          mv "$updated_manifest" manifest.json
+
+      - name: Commit plugin manifest
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add manifest.json
+
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+
+          git commit -m "chore: add $VERSION to plugin manifest [skip ci]"
+          git pull --rebase origin main
+          git push origin HEAD:main

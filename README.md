@@ -16,8 +16,18 @@ Creates a screenshot button that will save the screenshot in the same folder as 
 
 ## Installation
 
-1. Build or download the release zip
-2. Copy `Screenshot Capture_x.x.x.x/` into your Jellyfin `plugins/` directory
+### Plugin repository
+
+Add the following URL under **Dashboard > Plugins > Repositories**:
+
+```text
+https://raw.githubusercontent.com/NekoShinobi/jellyfin-plugin-screenshot/main/manifest.json
+```
+
+### Manual installation
+
+1. Download the release zip
+2. Extract it into a folder under your Jellyfin `plugins/` directory
 3. Restart Jellyfin
 
 ## Building
@@ -28,6 +38,16 @@ dotnet build -c Release
 
 Output: `Jellyfin.Plugin.Screenshot/Screenshot Capture_1.0.0.0/`
 
+Pushes and pull requests build a downloadable workflow artifact. To publish a
+version, manually run the **Build and release** workflow from the `main` branch
+and enter its changelog. The manual run replaces the fourth version component
+with the workflow run number, creates the GitHub release, and adds that version
+to `manifest.json`.
+
 ## Disclaimer
 
 > **This plugin was vibecoded.** It was built with AI assistance and has not been audited for production use. Use at your own risk.
+
+## License
+
+[MIT](LICENSE)
