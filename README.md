@@ -12,6 +12,8 @@ Adds a camera button to the Jellyfin video player OSD. On click, the server extr
 
 Should work with [jellyfin-desktop](https://github.com/jellyfin/jellyfin-desktop) w/ latest version.
 
+Creates a screenshot button that will be saved in the same folder as the executable - <img width="483" height="121" alt="image" src="https://github.com/user-attachments/assets/2acf3f03-83bb-4d46-bae0-402aa386b0f1" />
+
 ## Installation
 
 1. Build or download the release zip
