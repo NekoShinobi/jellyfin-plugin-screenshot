@@ -7,6 +7,15 @@
     "owner": "NekoShinobi",
     "category": "General",
     "imageUrl": "",
-    "versions": []
+    "versions": [
+      {
+        "changelog": "Initial Release",
+        "targetAbi": "10.11.0.0",
+        "version": "1.0.0.6",
+        "sourceUrl": "https://github.com/NekoShinobi/jellyfin-plugin-screenshot/releases/download/1.0.0.6/Jellyfin.Plugin.Screenshot_1.0.0.6.zip",
+        "checksum": "045ED7CAA0FD5711E8385884D7D44E38",
+        "timestamp": "2026-07-16T05:02:32Z"
+      }
+    ]
   }
 ]
