@@ -9,6 +9,14 @@
     "imageUrl": "",
     "versions": [
       {
+        "changelog": "trying to fix the sub alignment",
+        "targetAbi": "10.11.0.0",
+        "version": "1.0.0.8",
+        "sourceUrl": "https://github.com/NekoShinobi/jellyfin-plugin-screenshot/releases/download/1.0.0.8/Jellyfin.Plugin.Screenshot_1.0.0.8.zip",
+        "checksum": "13FEA2AF8CCEEF2B332FBE76A4908DB3",
+        "timestamp": "2026-09-02T17:54:58Z"
+      },
+      {
         "changelog": "Add an option to render with subtitle.",
         "targetAbi": "10.11.0.0",
         "version": "1.0.0.7",
