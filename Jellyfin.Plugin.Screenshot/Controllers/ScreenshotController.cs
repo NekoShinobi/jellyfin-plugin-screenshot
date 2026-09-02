@@ -159,7 +159,7 @@ public class ScreenshotController : ControllerBase
 
                 isTextSubtitle = subtitleStream.IsTextSubtitleStream;
                 subtitlePath = isTextSubtitle
-                    ? await CreateShiftedAssFile(item, mediaSource, subtitleStreamIndex.Value, offset, cancellationToken)
+                    ? await CreateAssFile(item, mediaSource, subtitleStreamIndex.Value, cancellationToken)
                         .ConfigureAwait(false)
                     : await _subtitleEncoder.GetSubtitleFilePath(subtitleStream, mediaSource, cancellationToken)
                         .ConfigureAwait(false);
@@ -260,7 +260,19 @@ public class ScreenshotController : ControllerBase
             if (isTextSubtitle)
             {
                 var escapedSubtitlePath = _mediaEncoder.EscapeSubtitleFilterPath(subtitlePath);
-                AddArgument(process.StartInfo, "-vf", $"subtitles=f='{escapedSubtitlePath}'");
+                var subtitleFilter = $"subtitles=f='{escapedSubtitlePath}'";
+
+                // FFmpeg keeps the original video PTS after input seeking, which lets
+                // libass select the event at the correct full-video timestamp. Rebase
+                // the filtered result afterward so output-side seeking remains relative
+                // to the short pre-seek window. This mirrors Jellyfin's transcode filter.
+                if (preSeek > TimeSpan.Zero)
+                {
+                    var clockOffset = FormatSeconds(preSeek);
+                    subtitleFilter = $"{subtitleFilter},setpts=PTS-{clockOffset}/TB";
+                }
+
+                AddArgument(process.StartInfo, "-vf", subtitleFilter);
             }
             else
             {
@@ -308,15 +320,12 @@ public class ScreenshotController : ControllerBase
         }
     }
 
-    private async Task<string> CreateShiftedAssFile(
+    private async Task<string> CreateAssFile(
         Video item,
         MediaSourceInfo mediaSource,
         int subtitleStreamIndex,
-        TimeSpan offset,
         CancellationToken cancellationToken)
     {
-        var preSeek = TimeSpan.FromSeconds(Math.Max(0, offset.TotalSeconds - 10));
-        var endTime = offset + TimeSpan.FromSeconds(1);
         var path = Path.Combine(Path.GetTempPath(), $"sc_sub_{Guid.NewGuid():N}.ass");
 
         try
@@ -326,9 +335,9 @@ public class ScreenshotController : ControllerBase
                     mediaSource.Id,
                     subtitleStreamIndex,
                     "ass",
-                    preSeek.Ticks,
-                    endTime.Ticks,
-                    false,
+                    0,
+                    0,
+                    true,
                     cancellationToken)
                 .ConfigureAwait(false);
             await using var output = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
