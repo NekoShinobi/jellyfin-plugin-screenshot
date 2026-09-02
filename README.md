@@ -1,6 +1,6 @@
 # Jellyfin Screenshot Capture Plugin
 
-Adds a camera button to the Jellyfin video player OSD. On click, the server extracts the exact frame via FFmpeg and downloads it as a JPEG.
+Adds a camera button to the Jellyfin video player OSD. On click, choose whether to include the currently selected subtitle track. The server extracts the exact frame via FFmpeg and downloads it as a JPEG.
 
 ## Requirements
 
@@ -38,11 +38,11 @@ dotnet build -c Release
 
 Output: `Jellyfin.Plugin.Screenshot/Screenshot Capture_1.0.0.0/`
 
-Pushes and pull requests build a downloadable workflow artifact. To publish a
-version, manually run the **Build and release** workflow from the `main` branch
-and enter its changelog. The manual run replaces the fourth version component
-with the workflow run number, creates the GitHub release, and adds that version
-to `manifest.json`.
+Pushes and pull requests build a downloadable workflow artifact. Every commit
+pushed to `main` also publishes a GitHub release and adds it to `manifest.json`,
+using the commit message as the changelog. The fourth version component is the
+workflow run number. The workflow can also be run manually with custom release
+notes.
 
 ## Disclaimer
 

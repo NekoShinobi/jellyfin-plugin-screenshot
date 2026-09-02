@@ -89,11 +89,13 @@ jobs:
 
   release:
     name: Publish release
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      CHANGELOG: ${{ inputs.changelog || github.event.head_commit.message || format('Automated release for {0}', github.sha) }}
 
     steps:
       - name: Check out repository
@@ -109,7 +111,6 @@ jobs:
 
       - name: Create GitHub release
         env:
-          CHANGELOG: ${{ inputs.changelog }}
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.build.outputs.version }}
         shell: bash
@@ -131,7 +132,6 @@ jobs:
 
       - name: Add release to plugin manifest
         env:
-          CHANGELOG: ${{ inputs.changelog }}
           VERSION: ${{ needs.build.outputs.version }}
         shell: bash
         run: |

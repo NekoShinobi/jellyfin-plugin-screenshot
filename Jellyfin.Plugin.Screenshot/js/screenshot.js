@@ -8,6 +8,8 @@
 
     const LOG_PREFIX = '[ScreenshotCapture]';
     const BTN_ID = 'screenshot-capture-btn';
+    const DIALOG_ID = 'screenshot-capture-dialog';
+    let closeCaptureDialog = null;
 
     /**
      * Reads the Jellyfin item ID currently playing from the OSD DOM.
@@ -43,10 +45,14 @@
         btn.innerHTML =
             '<span class="largePaperIconButton material-icons" aria-hidden="true">photo_camera</span>';
 
-        btn.addEventListener('click', function (e) {
+        btn.addEventListener('click', async function (e) {
             e.stopPropagation();
             e.preventDefault();
-            captureScreenshot();
+
+            const choice = await showCaptureOptions();
+            if (choice) {
+                captureScreenshot(choice === 'with-subtitles');
+            }
         });
 
         settingsBtn.parentElement.insertBefore(btn, settingsBtn);
@@ -58,6 +64,126 @@
      */
     function removeButton() {
         document.getElementById(BTN_ID)?.remove();
+        closeCaptureOptions();
+    }
+
+    /**
+     * Opens a Jellyfin-style action sheet and resolves with the selected capture mode.
+     */
+    function showCaptureOptions() {
+        closeCaptureOptions();
+
+        return new Promise(resolve => {
+            const previouslyFocused = document.activeElement;
+            const backdrop = document.createElement('div');
+            backdrop.className = 'dialogBackdrop dialogBackdropOpened';
+            backdrop.dataset.screenshotCaptureBackdrop = 'true';
+
+            const container = document.createElement('div');
+            container.id = DIALOG_ID;
+            container.className = 'dialogContainer';
+            container.innerHTML = `
+                <div class="focuscontainer dialog actionsheet-not-fullscreen actionSheet centeredDialog opened"
+                     role="dialog" aria-modal="true" aria-labelledby="screenshot-capture-title">
+                    <div class="actionSheetContent">
+                        <h1 id="screenshot-capture-title" class="actionSheetTitle">Take screenshot</h1>
+                        <div class="actionSheetScroller scrollY">
+                            <button is="emby-button" type="button"
+                                    class="listItem listItem-button actionSheetMenuItem emby-button"
+                                    data-capture-mode="with-subtitles">
+                                <span class="actionsheetMenuItemIcon listItemIcon listItemIcon-transparent material-icons closed_caption"
+                                      aria-hidden="true"></span>
+                                <div class="listItemBody actionsheetListItemBody">
+                                    <div class="listItemBodyText actionSheetItemText">With subtitles</div>
+                                </div>
+                            </button>
+                            <button is="emby-button" type="button"
+                                    class="listItem listItem-button actionSheetMenuItem emby-button"
+                                    data-capture-mode="without-subtitles">
+                                <span class="actionsheetMenuItemIcon listItemIcon listItemIcon-transparent material-icons photo_camera"
+                                      aria-hidden="true"></span>
+                                <div class="listItemBody actionsheetListItemBody">
+                                    <div class="listItemBodyText actionSheetItemText">Without subtitles</div>
+                                </div>
+                            </button>
+                        </div>
+                    </div>
+                </div>`;
+
+            let settled = false;
+            const finish = choice => {
+                if (settled) return;
+                settled = true;
+                document.removeEventListener('keydown', onKeyDown);
+                container.remove();
+                backdrop.remove();
+                closeCaptureDialog = null;
+                previouslyFocused?.focus?.();
+                resolve(choice);
+            };
+            const onKeyDown = event => {
+                if (event.key === 'Escape') {
+                    event.preventDefault();
+                    finish(null);
+                }
+            };
+            closeCaptureDialog = () => finish(null);
+
+            container.addEventListener('click', event => {
+                if (event.target === container) {
+                    finish(null);
+                    return;
+                }
+
+                const option = event.target.closest('[data-capture-mode]');
+                if (option) {
+                    finish(option.dataset.captureMode);
+                }
+            });
+            backdrop.addEventListener('click', () => finish(null));
+            document.addEventListener('keydown', onKeyDown);
+
+            document.body.append(backdrop, container);
+            requestAnimationFrame(() => {
+                container.querySelector('[data-capture-mode]')?.focus();
+            });
+        });
+    }
+
+    function closeCaptureOptions() {
+        if (closeCaptureDialog) {
+            closeCaptureDialog();
+            return;
+        }
+
+        document.getElementById(DIALOG_ID)?.remove();
+        document.querySelector('[data-screenshot-capture-backdrop]')?.remove();
+    }
+
+    /**
+     * Returns this client's active Jellyfin playback session.
+     */
+    async function getCurrentSession(itemId) {
+        try {
+            const serverAddress = ApiClient.serverAddress().replace(/\/$/, '');
+            const apiKey = ApiClient.accessToken();
+            const sessionsUrl = `${serverAddress}/Sessions?api_key=${encodeURIComponent(apiKey)}`;
+            const res = await fetch(sessionsUrl);
+
+            if (!res.ok) {
+                console.warn(LOG_PREFIX, 'Sessions API returned', res.status);
+                return null;
+            }
+
+            const sessions = await res.json();
+            const deviceId = ApiClient.deviceId();
+            return sessions.find(session =>
+                session.DeviceId === deviceId && session.NowPlayingItem?.Id === itemId
+            ) || sessions.find(session => session.DeviceId === deviceId) || null;
+        } catch (err) {
+            console.warn(LOG_PREFIX, 'Sessions API request failed:', err);
+            return null;
+        }
     }
 
     /**
@@ -68,7 +194,7 @@
      * element exists but its currentTime stays at 0. We fall back to the Sessions
      * API which always reflects the authoritative server-side position.
      */
-    async function getPositionTicks() {
+    async function getPositionTicks(session) {
         const video = document.querySelector('video');
         console.debug(LOG_PREFIX, 'video element:', video, 'currentTime:', video?.currentTime);
 
@@ -80,32 +206,10 @@
 
         console.log(LOG_PREFIX, 'video.currentTime unavailable, falling back to Sessions API');
 
-        // Native / desktop client fallback: ask the Sessions API
-        try {
-            const serverAddress = ApiClient.serverAddress().replace(/\/$/, '');
-            const apiKey = ApiClient.accessToken();
-            const sessionsUrl = `${serverAddress}/Sessions?api_key=${encodeURIComponent(apiKey)}`;
-            console.debug(LOG_PREFIX, 'Fetching sessions:', sessionsUrl);
-
-            const res = await fetch(sessionsUrl);
-            console.debug(LOG_PREFIX, 'Sessions response status:', res.status);
-            if (!res.ok) {
-                console.warn(LOG_PREFIX, 'Sessions API returned', res.status);
-                return 0;
-            }
-
-            const sessions = await res.json();
-            const deviceId = ApiClient.deviceId();
-            console.debug(LOG_PREFIX, `Looking for deviceId=${deviceId} in ${sessions.length} sessions`);
-
-            const mine = sessions.find(s => s.DeviceId === deviceId);
-            const ticks = mine?.PlayState?.PositionTicks ?? 0;
-            console.log(LOG_PREFIX, `Position from Sessions API: ${ticks} ticks (session found: ${!!mine})`);
-            return ticks;
-        } catch (err) {
-            console.warn(LOG_PREFIX, 'Sessions API fallback failed:', err);
-            return 0;
-        }
+        // Native / desktop client fallback: use the authoritative session position.
+        const ticks = session?.PlayState?.PositionTicks ?? 0;
+        console.log(LOG_PREFIX, `Position from Sessions API: ${ticks} ticks (session found: ${!!session})`);
+        return ticks;
     }
 
     /**
@@ -118,7 +222,7 @@
      *   Content-Disposition: attachment is intercepted by the browser's download handler
      *   without navigating the SPA.
      */
-    async function captureScreenshot() {
+    async function captureScreenshot(includeSubtitles) {
         console.log(LOG_PREFIX, '--- captureScreenshot start ---');
 
         const itemId = getCurrentItemId();
@@ -128,8 +232,21 @@
             return;
         }
 
-        const positionTicks = await getPositionTicks();
+        const session = await getCurrentSession(itemId);
+        const positionTicks = await getPositionTicks(session);
         console.log(LOG_PREFIX, 'positionTicks resolved:', positionTicks);
+
+        const subtitleStreamIndex = session?.PlayState?.SubtitleStreamIndex;
+        if (includeSubtitles && !(Number.isInteger(subtitleStreamIndex) && subtitleStreamIndex >= 0)) {
+            const message = 'No subtitle track is currently selected.';
+            console.warn(LOG_PREFIX, message);
+            if (window.Dashboard?.alert) {
+                window.Dashboard.alert(message);
+            } else {
+                window.alert(message);
+            }
+            return;
+        }
 
         const serverAddress = ApiClient.serverAddress().replace(/\/$/, '');
         const apiKey = ApiClient.accessToken();
@@ -137,6 +254,12 @@
         const url = `${serverAddress}/Screenshot/capture`
             + `?itemId=${encodeURIComponent(itemId)}`
             + `&positionTicks=${positionTicks}`
+            + (session?.PlayState?.MediaSourceId
+                ? `&mediaSourceId=${encodeURIComponent(session.PlayState.MediaSourceId)}`
+                : '')
+            + (includeSubtitles
+                ? `&subtitleStreamIndex=${subtitleStreamIndex}`
+                : '')
             + `&api_key=${encodeURIComponent(apiKey)}`;
 
         console.log(LOG_PREFIX, 'Download URL (key redacted):', url.replace(apiKey, '[REDACTED]'));
