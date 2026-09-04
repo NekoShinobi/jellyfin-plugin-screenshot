@@ -4,6 +4,7 @@ using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Model.Dto;
@@ -207,7 +208,7 @@ public class ScreenshotController : ControllerBase
         try { System.IO.File.Delete(outputPath); }
         catch (Exception ex) { _logger.LogWarning(ex, "Could not delete temp file: {Path}", outputPath); }
 
-        var filename = $"{SanitizeFilename(item.Name)}_{offset:hh\\-mm\\-ss}.jpg";
+        var filename = BuildFilename(item, offset);
         _logger.LogInformation("Returning {Bytes} bytes as '{Filename}'", bytes.Length, filename);
 
         return File(bytes, "image/jpeg", filename);
@@ -385,6 +386,25 @@ public class ScreenshotController : ControllerBase
     private static string FormatSeconds(TimeSpan value)
         => value.TotalSeconds.ToString("F3", System.Globalization.CultureInfo.InvariantCulture);
 
+    private static string BuildFilename(Video item, TimeSpan offset)
+    {
+        var name = SanitizeFilename(item.Name);
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            name = "Screenshot";
+        }
+
+        var episodeCode = item is Episode
+            && item.ParentIndexNumber.HasValue
+            && item.IndexNumber.HasValue
+                ? $"-S{item.ParentIndexNumber.Value:D2}E{item.IndexNumber.Value:D2}"
+                : string.Empty;
+        var totalHours = (long)Math.Floor(offset.TotalHours);
+        var timestamp = $"{totalHours:D2}-{offset.Minutes:D2}-{offset.Seconds:D2}";
+
+        return $"{name}{episodeCode}-{timestamp}.jpg";
+    }
+
     private void DeleteTempFile(string? path, bool isTemporary)
     {
         if (!isTemporary || string.IsNullOrEmpty(path) || !System.IO.File.Exists(path))
@@ -404,11 +424,16 @@ public class ScreenshotController : ControllerBase
 
     private static string SanitizeFilename(string name)
     {
-        foreach (var c in Path.GetInvalidFileNameChars())
+        foreach (var c in "<>:\"/\\|?*")
         {
             name = name.Replace(c, '_');
         }
 
-        return name;
+        foreach (var c in name.Where(c => char.IsControl(c)).Distinct())
+        {
+            name = name.Replace(c, '_');
+        }
+
+        return name.TrimEnd('.', ' ');
     }
 }

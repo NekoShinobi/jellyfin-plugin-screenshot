@@ -9,7 +9,39 @@
     const LOG_PREFIX = '[ScreenshotCapture]';
     const BTN_ID = 'screenshot-capture-btn';
     const DIALOG_ID = 'screenshot-capture-dialog';
+    const TICKS_PER_SECOND = 10_000_000;
     let closeCaptureDialog = null;
+
+    /**
+     * Loads one of Jellyfin Web's legacy modules without making capture depend on it.
+     */
+    function loadJellyfinModule(name) {
+        return new Promise(resolve => {
+            if (typeof window.require !== 'function') {
+                resolve(null);
+                return;
+            }
+
+            let settled = false;
+            const finish = module => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timeout);
+                resolve(module);
+            };
+            const timeout = setTimeout(() => finish(null), 1_000);
+
+            try {
+                window.require([name], finish, error => {
+                    console.debug(LOG_PREFIX, `Jellyfin module '${name}' unavailable:`, error);
+                    finish(null);
+                });
+            } catch (error) {
+                console.debug(LOG_PREFIX, `Could not load Jellyfin module '${name}':`, error);
+                finish(null);
+            }
+        });
+    }
 
     /**
      * Reads the Jellyfin item ID currently playing from the OSD DOM.
@@ -189,27 +221,137 @@
     /**
      * Returns the current playback position in Jellyfin ticks (1 tick = 100 ns).
      *
-     * In the browser the HTML5 <video> element carries the real position.
-     * In Jellyfin Media Player (JMP) the video is decoded by libmpv — the <video>
-     * element exists but its currentTime stays at 0. We fall back to the Sessions
-     * API which always reflects the authoritative server-side position.
+     * Jellyfin's playback manager combines the player clock with any transcode/seek
+     * offset. Session state and raw HTML video time are progressively less accurate
+     * fallbacks for clients that do not expose the playback manager module.
      */
-    async function getPositionTicks(session) {
-        const video = document.querySelector('video');
-        console.debug(LOG_PREFIX, 'video element:', video, 'currentTime:', video?.currentTime);
+    async function getPositionTicks(itemId, session) {
+        const playbackModule = await loadJellyfinModule('playbackManager');
+        const playbackManager = playbackModule?.playbackManager
+            || playbackModule?.default
+            || playbackModule;
 
-        if (video && video.currentTime > 0) {
-            const ticks = Math.round(video.currentTime * 10_000_000);
-            console.log(LOG_PREFIX, `Position from video element: ${video.currentTime}s → ${ticks} ticks`);
+        try {
+            const player = playbackManager?.getCurrentPlayer?.();
+            const currentItem = player ? playbackManager?.currentItem?.(player) : null;
+            const isRequestedItem = !currentItem?.Id || currentItem.Id === itemId;
+
+            if (player && isRequestedItem && typeof playbackManager?.getCurrentTicks === 'function') {
+                // Jellyfin adds the current transcode/seek offset here. Raw video.currentTime
+                // is only relative to the current stream and can be wildly wrong after seeking.
+                const ticks = Math.round(playbackManager.getCurrentTicks(player));
+                if (Number.isSafeInteger(ticks) && ticks >= 0) {
+                    console.log(LOG_PREFIX, `Position from playback manager: ${ticks} ticks`);
+                    return ticks;
+                }
+            }
+        } catch (error) {
+            console.warn(LOG_PREFIX, 'Could not read position from playback manager:', error);
+        }
+
+        const slider = document.querySelector('.videoOsdBottom .osdPositionSlider');
+        const runtimeTicks = Number(session?.NowPlayingItem?.RunTimeTicks);
+        const progressPercent = Number(slider?.value);
+        if (slider
+            && Number.isSafeInteger(runtimeTicks)
+            && runtimeTicks > 0
+            && Number.isFinite(progressPercent)
+            && progressPercent >= 0
+            && progressPercent <= 100) {
+            const ticks = Math.round(runtimeTicks * progressPercent / 100);
+            console.log(LOG_PREFIX, `Position from OSD progress: ${ticks} ticks`);
             return ticks;
         }
 
-        console.log(LOG_PREFIX, 'video.currentTime unavailable, falling back to Sessions API');
+        const sessionTicks = Number(session?.PlayState?.PositionTicks);
+        if (Number.isSafeInteger(sessionTicks) && sessionTicks >= 0) {
+            console.log(LOG_PREFIX, `Position from Sessions API: ${sessionTicks} ticks`);
+            return sessionTicks;
+        }
 
-        // Native / desktop client fallback: use the authoritative session position.
-        const ticks = session?.PlayState?.PositionTicks ?? 0;
-        console.log(LOG_PREFIX, `Position from Sessions API: ${ticks} ticks (session found: ${!!session})`);
+        // Last-resort browser fallback for clients that expose neither module nor session state.
+        const video = document.querySelector('video');
+        const ticks = Math.round((video?.currentTime || 0) * TICKS_PER_SECOND);
+        console.warn(LOG_PREFIX, `Using raw video position as final fallback: ${ticks} ticks`);
         return ticks;
+    }
+
+    function padNumber(value) {
+        return String(value).padStart(2, '0');
+    }
+
+    function sanitizeFilenamePart(value) {
+        return String(value || 'Screenshot')
+            .replace(/[<>:"/\\|?*\u0000-\u001F]/g, '_')
+            .replace(/[. ]+$/g, '')
+            || 'Screenshot';
+    }
+
+    function buildFilename(item, positionTicks) {
+        const name = sanitizeFilenamePart(item?.Name);
+        const season = Number(item?.ParentIndexNumber);
+        const episode = Number(item?.IndexNumber);
+        const episodeCode = item?.Type === 'Episode'
+            && item?.ParentIndexNumber != null
+            && item?.IndexNumber != null
+            && Number.isInteger(season)
+            && Number.isInteger(episode)
+            ? `-S${padNumber(season)}E${padNumber(episode)}`
+            : '';
+        const totalSeconds = Math.max(0, Math.floor(positionTicks / TICKS_PER_SECOND));
+        const hours = Math.floor(totalSeconds / 3_600);
+        const minutes = Math.floor(totalSeconds % 3_600 / 60);
+        const seconds = totalSeconds % 60;
+
+        return `${name}${episodeCode}-${padNumber(hours)}-${padNumber(minutes)}-${padNumber(seconds)}.jpg`;
+    }
+
+    function showFallbackToast(message) {
+        document.getElementById('screenshot-capture-toast')?.remove();
+
+        const toast = document.createElement('div');
+        toast.id = 'screenshot-capture-toast';
+        toast.className = 'toast';
+        toast.setAttribute('role', 'status');
+        toast.setAttribute('aria-live', 'polite');
+        toast.textContent = message;
+        toast.style.cssText = [
+            'position:fixed',
+            'left:50%',
+            'bottom:7em',
+            'transform:translateX(-50%)',
+            'z-index:100000',
+            'max-width:min(90vw,42em)',
+            'padding:.9em 1.25em',
+            'border-radius:.3em',
+            'background:rgba(32,32,32,.96)',
+            'color:#fff',
+            'box-shadow:0 .15em .6em rgba(0,0,0,.35)',
+            'font-size:1rem',
+            'text-align:center'
+        ].join(';');
+        document.body.appendChild(toast);
+        setTimeout(() => toast.remove(), 5_000);
+    }
+
+    async function showToast(message) {
+        const toastModule = await loadJellyfinModule('toast');
+        const jellyfinToast = toastModule?.default || toastModule;
+
+        try {
+            if (typeof jellyfinToast === 'function') {
+                jellyfinToast(message);
+                return;
+            }
+            if (typeof jellyfinToast?.show === 'function') {
+                jellyfinToast.show(message);
+                return;
+            }
+        } catch (error) {
+            console.debug(LOG_PREFIX, 'Jellyfin toast failed:', error);
+        }
+
+        showFallbackToast(message);
     }
 
     /**
@@ -233,8 +375,9 @@
         }
 
         const session = await getCurrentSession(itemId);
-        const positionTicks = await getPositionTicks(session);
+        const positionTicks = await getPositionTicks(itemId, session);
         console.log(LOG_PREFIX, 'positionTicks resolved:', positionTicks);
+        const filename = buildFilename(session?.NowPlayingItem, positionTicks);
 
         const subtitleStreamIndex = session?.PlayState?.SubtitleStreamIndex;
         if (includeSubtitles && !(Number.isInteger(subtitleStreamIndex) && subtitleStreamIndex >= 0)) {
@@ -268,6 +411,7 @@
             if (window.jmpNative && window.jmpNative.startDownload) {
                 // CEF desktop client — use native download API, no frame involved
                 window.jmpNative.startDownload(url);
+                showToast(`Saving screenshot as ${filename}`);
                 console.log(LOG_PREFIX, '✓ startDownload called (CEF path)');
             } else {
                 // Browser / Qt WebEngine — hidden iframe triggers Content-Disposition handler
@@ -279,6 +423,7 @@
                     if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
                     console.log(LOG_PREFIX, 'iframe removed');
                 }, 30_000);
+                showToast(`Saving screenshot as ${filename}`);
                 console.log(LOG_PREFIX, '✓ iframe injected (browser path)');
             }
         } catch (err) {
