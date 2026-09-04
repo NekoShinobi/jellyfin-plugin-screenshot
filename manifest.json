@@ -9,6 +9,14 @@
     "imageUrl": "",
     "versions": [
       {
+        "changelog": "Fix timestmap and remove the artifacts.",
+        "targetAbi": "10.11.0.0",
+        "version": "1.0.0.9",
+        "sourceUrl": "https://github.com/NekoShinobi/jellyfin-plugin-screenshot/releases/download/1.0.0.9/Jellyfin.Plugin.Screenshot_1.0.0.9.zip",
+        "checksum": "0B4EB12A54903A689932CA975C0476CF",
+        "timestamp": "2026-09-04T02:06:29Z"
+      },
+      {
         "changelog": "trying to fix the sub alignment",
         "targetAbi": "10.11.0.0",
         "version": "1.0.0.8",
