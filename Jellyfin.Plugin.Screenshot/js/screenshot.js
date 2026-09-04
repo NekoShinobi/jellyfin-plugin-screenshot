@@ -226,6 +226,28 @@
      * fallbacks for clients that do not expose the playback manager module.
      */
     async function getPositionTicks(itemId, session) {
+        // jellyfin-desktop renders through MPV rather than an HTML video element.
+        // Its player clock is exposed in milliseconds and is the freshest source
+        // available; session reports can lag and a retained OSD slider can be stale.
+        try {
+            const nativePlayer = window._mpvVideoPlayerInstance;
+            const nativeItemId = nativePlayer?._currentPlayOptions?.item?.Id;
+            const isRequestedItem = !nativeItemId
+                || String(nativeItemId).toLowerCase() === String(itemId).toLowerCase();
+            const positionMs = nativePlayer?.currentTime?.();
+
+            if (window.jmpNative
+                && isRequestedItem
+                && Number.isFinite(positionMs)
+                && positionMs >= 0) {
+                const ticks = Math.round(positionMs * 10_000);
+                console.log(LOG_PREFIX, `Position from desktop player: ${ticks} ticks`);
+                return ticks;
+            }
+        } catch (error) {
+            console.warn(LOG_PREFIX, 'Could not read position from desktop player:', error);
+        }
+
         const playbackModule = await loadJellyfinModule('playbackManager');
         const playbackManager = playbackModule?.playbackManager
             || playbackModule?.default
@@ -360,9 +382,8 @@
      * jellyfin-desktop (CEF): uses jmpNative.startDownload → CefBrowserHost::StartDownload.
      *   No frame navigation, so canceling the save dialog does not corrupt CEF load state.
      *
-     * Browser / Qt WebEngine fallback: hidden iframe pointing at the API URL.
-     *   Content-Disposition: attachment is intercepted by the browser's download handler
-     *   without navigating the SPA.
+     * Browser / desktop fallback: fetches the complete image, then downloads a blob.
+     *   Waiting for the response prevents DOM cleanup from aborting long subtitle renders.
      */
     async function captureScreenshot(includeSubtitles) {
         console.log(LOG_PREFIX, '--- captureScreenshot start ---');
@@ -414,20 +435,30 @@
                 showToast(`Saving screenshot as ${filename}`);
                 console.log(LOG_PREFIX, '✓ startDownload called (CEF path)');
             } else {
-                // Browser / Qt WebEngine — hidden iframe triggers Content-Disposition handler
-                const iframe = document.createElement('iframe');
-                iframe.style.cssText = 'display:none;width:0;height:0;border:0;position:absolute;';
-                iframe.src = url;
-                document.body.appendChild(iframe);
-                setTimeout(() => {
-                    if (iframe.parentNode) iframe.parentNode.removeChild(iframe);
-                    console.log(LOG_PREFIX, 'iframe removed');
-                }, 30_000);
+                showToast(`Creating screenshot as ${filename}`);
+
+                const response = await fetch(url);
+                if (!response.ok) {
+                    const detail = await response.text();
+                    throw new Error(detail || `Screenshot request failed (${response.status})`);
+                }
+
+                const blobUrl = URL.createObjectURL(await response.blob());
+                const link = document.createElement('a');
+                link.href = blobUrl;
+                link.download = filename;
+                link.style.display = 'none';
+                document.body.appendChild(link);
+                link.click();
+                link.remove();
+                setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
+
                 showToast(`Saving screenshot as ${filename}`);
-                console.log(LOG_PREFIX, '✓ iframe injected (browser path)');
+                console.log(LOG_PREFIX, '✓ screenshot response downloaded (browser path)');
             }
         } catch (err) {
             console.error(LOG_PREFIX, 'Capture failed:', err);
+            showToast(`Screenshot failed: ${err.message || err}`);
         }
     }
 

@@ -22,6 +22,14 @@ namespace Jellyfin.Plugin.Screenshot.Controllers;
 [Route("Screenshot")]
 public class ScreenshotController : ControllerBase
 {
+    /// <summary>
+    /// Upper bound for the FFmpeg run. An accurate seek only decodes from the keyframe
+    /// preceding the target, so a healthy extraction takes a couple of seconds at most;
+    /// anything beyond this is a stuck process and is killed rather than left to run
+    /// past the point where the client has given up waiting.
+    /// </summary>
+    private static readonly TimeSpan FfmpegTimeout = TimeSpan.FromSeconds(45);
+
     private readonly ILibraryManager _libraryManager;
     private readonly IMediaSourceManager _mediaSourceManager;
     private readonly IMediaEncoder _mediaEncoder;
@@ -136,12 +144,16 @@ public class ScreenshotController : ControllerBase
 
         var offset = TimeSpan.FromTicks(positionTicks);
         var outputPath = Path.Combine(Path.GetTempPath(), $"sc_{Guid.NewGuid():N}.jpg");
+        var videoStreamIndex = FindVideoStreamIndex(mediaSource);
         string? subtitlePath = null;
         var isTextSubtitle = false;
 
         _logger.LogInformation(
             "Extracting frame — offset={Offset} outputPath={Output}",
             offset, outputPath);
+
+        using var ffmpegCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        ffmpegCts.CancelAfter(FfmpegTimeout);
 
         try
         {
@@ -159,22 +171,82 @@ public class ScreenshotController : ControllerBase
                 }
 
                 isTextSubtitle = subtitleStream.IsTextSubtitleStream;
+
+                // Preparing an embedded subtitle makes Jellyfin extract the file's subtitle
+                // tracks into its subtitle cache, which on the first request for a large file
+                // can outlast the client's patience. Deliberately uncancellable: aborting the
+                // extraction discards it, so every retry would start over and fail the same
+                // way, whereas letting it finish fills the cache and makes the next capture
+                // immediate. Jellyfin bounds this itself through the server's
+                // SubtitleExtractionTimeoutMinutes setting.
+                var subtitleTimer = Stopwatch.StartNew();
+
                 subtitlePath = isTextSubtitle
-                    ? await CreateAssFile(item, mediaSource, subtitleStreamIndex.Value, cancellationToken)
+                    ? await CreateAssFile(item, mediaSource, subtitleStreamIndex.Value, CancellationToken.None)
                         .ConfigureAwait(false)
-                    : await _subtitleEncoder.GetSubtitleFilePath(subtitleStream, mediaSource, cancellationToken)
+                    : await _subtitleEncoder.GetSubtitleFilePath(subtitleStream, mediaSource, CancellationToken.None)
                         .ConfigureAwait(false);
+
+                _logger.LogInformation(
+                    "Subtitle prepared in {Elapsed} ms — isTextSubtitle={IsText} path={Path}",
+                    subtitleTimer.ElapsedMilliseconds, isTextSubtitle, subtitlePath);
             }
 
-            await ExtractFrameAccurate(
+            var ffmpegTimer = Stopwatch.StartNew();
+
+            var stderr = await ExtractFrameAccurate(
                     ffmpegPath,
                     inputPath,
                     offset,
                     outputPath,
                     subtitlePath,
                     isTextSubtitle,
-                    cancellationToken)
+                    videoStreamIndex,
+                    ffmpegCts.Token)
                 .ConfigureAwait(false);
+
+            _logger.LogInformation("FFmpeg finished in {Elapsed} ms", ffmpegTimer.ElapsedMilliseconds);
+
+            if (!System.IO.File.Exists(outputPath))
+            {
+                // FFmpeg reports success when it reaches the end of the input without ever
+                // producing a frame, so a missing file means the filter chain discarded
+                // everything rather than that the write failed.
+                _logger.LogError(
+                    "FFmpeg exited successfully but wrote no image to {Path}. stderr: {Stderr}",
+                    outputPath,
+                    stderr);
+                return StatusCode(500, "FFmpeg produced no image for that position.");
+            }
+
+            var fileInfo = new FileInfo(outputPath);
+            _logger.LogInformation("Output file created — size={Bytes} bytes", fileInfo.Length);
+
+            if (fileInfo.Length == 0)
+            {
+                _logger.LogError("Output file is empty: {Path}", outputPath);
+                return StatusCode(500, "Extracted image is empty.");
+            }
+
+            var bytes = await System.IO.File.ReadAllBytesAsync(outputPath, cancellationToken)
+                .ConfigureAwait(false);
+            var filename = BuildFilename(item, offset);
+            _logger.LogInformation("Returning {Bytes} bytes as '{Filename}'", bytes.Length, filename);
+
+            return File(bytes, "image/jpeg", filename);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            _logger.LogInformation("Frame extraction canceled for item {Name} because the client disconnected", item.Name);
+            return StatusCode(499);
+        }
+        catch (OperationCanceledException)
+        {
+            _logger.LogError(
+                "FFmpeg was killed after exceeding the {Seconds}s frame extraction limit for item {Name}",
+                FfmpegTimeout.TotalSeconds,
+                item.Name);
+            return StatusCode(504, $"Frame extraction timed out after {FfmpegTimeout.TotalSeconds:F0} seconds.");
         }
         catch (Exception ex)
         {
@@ -184,122 +256,138 @@ public class ScreenshotController : ControllerBase
         finally
         {
             DeleteTempFile(subtitlePath, isTextSubtitle);
+            DeleteTempFile(outputPath, true);
         }
-
-        if (!System.IO.File.Exists(outputPath))
-        {
-            _logger.LogError("Output file missing after FFmpeg completed: {Path}", outputPath);
-            return StatusCode(500, "Extracted image not found after FFmpeg run.");
-        }
-
-        var fileInfo = new FileInfo(outputPath);
-        _logger.LogInformation("Output file created — size={Bytes} bytes", fileInfo.Length);
-
-        if (fileInfo.Length == 0)
-        {
-            _logger.LogError("Output file is empty: {Path}", outputPath);
-            System.IO.File.Delete(outputPath);
-            return StatusCode(500, "Extracted image is empty.");
-        }
-
-        var bytes = await System.IO.File.ReadAllBytesAsync(outputPath, cancellationToken)
-            .ConfigureAwait(false);
-
-        try { System.IO.File.Delete(outputPath); }
-        catch (Exception ex) { _logger.LogWarning(ex, "Could not delete temp file: {Path}", outputPath); }
-
-        var filename = BuildFilename(item, offset);
-        _logger.LogInformation("Returning {Bytes} bytes as '{Filename}'", bytes.Length, filename);
-
-        return File(bytes, "image/jpeg", filename);
     }
 
     /// <summary>
-    /// Spawns FFmpeg with a two-stage seek for frame-accurate extraction.
+    /// Spawns FFmpeg to write a single frame, and returns its stderr output.
     /// Stderr is read concurrently with WaitForExitAsync to prevent pipe buffer deadlock
     /// (FFmpeg is verbose; blocking on a full stderr pipe would hang indefinitely).
     /// </summary>
-    private async Task ExtractFrameAccurate(
+    private async Task<string> ExtractFrameAccurate(
         string ffmpegPath,
         string inputPath,
         TimeSpan offset,
         string outputPath,
         string? subtitlePath,
         bool isTextSubtitle,
+        int videoStreamIndex,
         CancellationToken cancellationToken)
     {
-        // Pre-input fast seek to 10 s before target, then post-input accurate seek
-        // for the remaining delta — efficient and frame-accurate.
-        var preSeek = TimeSpan.FromSeconds(Math.Max(0, offset.TotalSeconds - 10));
-        var postSeek = offset - preSeek;
-
         using var process = new Process
         {
             StartInfo = new ProcessStartInfo
             {
                 FileName = ffmpegPath,
                 UseShellExecute = false,
+                RedirectStandardInput = true,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
                 CreateNoWindow = true
             }
         };
 
-        AddArgument(process.StartInfo, "-ss", FormatSeconds(preSeek));
-        AddArgument(process.StartInfo, "-i", inputPath);
+        var startInfo = process.StartInfo;
 
-        if (!string.IsNullOrEmpty(subtitlePath) && !isTextSubtitle)
+        startInfo.ArgumentList.Add("-hide_banner");
+        startInfo.ArgumentList.Add("-nostdin");
+        AddArgument(startInfo, "-loglevel", "warning");
+
+        // Keep the source timestamps across the input seek. Without -copyts FFmpeg rebases
+        // the seek point to zero, and then libass renders whatever is at the start of the
+        // file instead of what is on screen — while any filter or output option that
+        // compares against the real position discards every frame, leaving FFmpeg to decode
+        // to the end of the file and exit successfully without ever writing an image.
+        startInfo.ArgumentList.Add("-copyts");
+
+        // A single input-side seek. Accurate seeking (FFmpeg's default) decodes from the
+        // keyframe preceding the target and discards the rest, so the cost is one GOP
+        // regardless of how far into the file the position is.
+        AddArgument(startInfo, "-ss", FormatSeconds(offset));
+        AddArgument(startInfo, "-i", inputPath);
+
+        // Fall back to FFmpeg's own selection when the index is unknown; addressing the
+        // stream directly avoids picking up embedded cover art as "the" video stream.
+        var videoPad = videoStreamIndex >= 0
+            ? $"0:{videoStreamIndex.ToString(System.Globalization.CultureInfo.InvariantCulture)}"
+            : "0:v:0";
+        var hasSubtitle = !string.IsNullOrEmpty(subtitlePath);
+
+        if (hasSubtitle && !isTextSubtitle)
         {
-            AddArgument(process.StartInfo, "-ss", FormatSeconds(preSeek));
-            AddArgument(process.StartInfo, "-i", subtitlePath);
+            // Graphical subtitles come from the extracted stream, read from its start: an
+            // event that is still on screen at the capture point was signalled earlier, and
+            // seeking a raw subtitle stream would skip the packet that carries it.
+            AddArgument(startInfo, "-i", subtitlePath!);
         }
 
-        AddArgument(process.StartInfo, "-ss", FormatSeconds(postSeek));
-
-        if (!string.IsNullOrEmpty(subtitlePath))
+        if (hasSubtitle && isTextSubtitle)
         {
-            if (isTextSubtitle)
-            {
-                var escapedSubtitlePath = _mediaEncoder.EscapeSubtitleFilterPath(subtitlePath);
-                var subtitleFilter = $"subtitles=f='{escapedSubtitlePath}'";
+            var escapedSubtitlePath = _mediaEncoder.EscapeSubtitleFilterPath(subtitlePath!);
 
-                // FFmpeg keeps the original video PTS after input seeking, which lets
-                // libass select the event at the correct full-video timestamp. Rebase
-                // the filtered result afterward so output-side seeking remains relative
-                // to the short pre-seek window. This mirrors Jellyfin's transcode filter.
-                if (preSeek > TimeSpan.Zero)
-                {
-                    var clockOffset = FormatSeconds(preSeek);
-                    subtitleFilter = $"{subtitleFilter},setpts=PTS-{clockOffset}/TB";
-                }
-
-                AddArgument(process.StartInfo, "-vf", subtitleFilter);
-            }
-            else
-            {
-                AddArgument(
-                    process.StartInfo,
-                    "-filter_complex",
-                    "[0:v:0][1:s:0]overlay=eof_action=pass:repeatlast=0");
-            }
+            AddArgument(startInfo, "-map", videoPad);
+            AddArgument(
+                startInfo,
+                "-vf",
+                $"subtitles=f='{escapedSubtitlePath}',setpts=PTS-STARTPTS");
+        }
+        else if (hasSubtitle)
+        {
+            AddArgument(
+                startInfo,
+                "-filter_complex",
+                $"[{videoPad}][1:s:0]overlay=eof_action=pass:repeatlast=0,setpts=PTS-STARTPTS");
+        }
+        else
+        {
+            AddArgument(startInfo, "-map", videoPad);
         }
 
-        AddArgument(process.StartInfo, "-frames:v", "1");
-        AddArgument(process.StartInfo, "-q:v", "2");
-        AddArgument(process.StartInfo, "-y", outputPath);
+        startInfo.ArgumentList.Add("-an");
+        AddArgument(startInfo, "-frames:v", "1");
+        AddArgument(startInfo, "-q:v", "2");
+
+        // The output is a single file rather than a numbered sequence; without -update
+        // the image2 muxer warns about the missing pattern on every capture.
+        AddArgument(startInfo, "-update", "1");
+        AddArgument(startInfo, "-y", outputPath);
 
         _logger.LogInformation(
-            "Starting FFmpeg frame extraction with subtitles={WithSubtitles}",
-            !string.IsNullOrEmpty(subtitlePath));
+            "Starting FFmpeg frame extraction with subtitles={WithSubtitles}: {Command} {Arguments}",
+            hasSubtitle,
+            ffmpegPath,
+            string.Join(' ', startInfo.ArgumentList));
 
         process.Start();
+        process.StandardInput.Close();
 
         // Read stderr concurrently — if we wait for exit first, FFmpeg's verbose
         // output fills the pipe buffer, FFmpeg blocks, and WaitForExitAsync deadlocks.
-        var stderrTask = process.StandardError.ReadToEndAsync(cancellationToken);
-        var stdoutTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
+        var stderrTask = process.StandardError.ReadToEndAsync();
+        var stdoutTask = process.StandardOutput.ReadToEndAsync();
 
-        await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                if (!process.HasExited)
+                {
+                    process.Kill(true);
+                }
+            }
+            catch (InvalidOperationException)
+            {
+                // The process exited between the HasExited check and Kill.
+            }
+
+            await process.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false);
+            throw;
+        }
 
         var stderr = await stderrTask.ConfigureAwait(false);
         var stdout = await stdoutTask.ConfigureAwait(false);
@@ -319,6 +407,41 @@ public class ScreenshotController : ControllerBase
             throw new InvalidOperationException(
                 $"FFmpeg exited with code {process.ExitCode}. stderr: {stderr}");
         }
+
+        return stderr;
+    }
+
+    /// <summary>
+    /// Resolves the FFmpeg stream index of the media source's video stream.
+    /// Mirrors <c>EncodingHelper.FindIndex</c>: a media source can span several files
+    /// (external subtitles alongside the video), and only the streams that live in the
+    /// same file count towards the index FFmpeg sees for that input.
+    /// </summary>
+    private static int FindVideoStreamIndex(MediaSourceInfo? mediaSource)
+    {
+        var streams = mediaSource?.MediaStreams;
+        var videoStream = mediaSource?.VideoStream;
+
+        if (streams is null || videoStream is null)
+        {
+            return -1;
+        }
+
+        var index = 0;
+        foreach (var stream in streams)
+        {
+            if (stream == videoStream)
+            {
+                return index;
+            }
+
+            if (string.Equals(stream.Path, videoStream.Path, StringComparison.Ordinal))
+            {
+                index++;
+            }
+        }
+
+        return -1;
     }
 
     private async Task<string> CreateAssFile(
