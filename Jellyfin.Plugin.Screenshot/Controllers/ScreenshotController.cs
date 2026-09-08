@@ -60,18 +60,29 @@ public class ScreenshotController : ControllerBase
     [AllowAnonymous]
     public ActionResult GetScript()
     {
-        var resourceName = $"{GetType().Namespace!.Replace(".Controllers", string.Empty)}.js.screenshot.js";
-        _logger.LogDebug("Serving script resource: {Name}", resourceName);
-
-        var stream = GetType().Assembly.GetManifestResourceStream(resourceName);
-        if (stream is null)
+        var assembly = GetType().Assembly;
+        var prefix = typeof(Plugin).Namespace;
+        var parts = new List<string>();
+        foreach (var name in new[] { "screenshot.js", "clipping.js" })
         {
-            _logger.LogError("Embedded resource not found: {Name}", resourceName);
-            return NotFound();
+            using var stream = assembly.GetManifestResourceStream($"{prefix}.js.{name}");
+            if (stream is null) return NotFound();
+            using var reader = new StreamReader(stream);
+            parts.Add(reader.ReadToEnd());
         }
-
         Response.Headers.CacheControl = "no-cache, must-revalidate";
-        return new FileStreamResult(stream, "application/javascript");
+        return Content(string.Join("\n;\n", parts), "application/javascript", System.Text.Encoding.UTF8);
+    }
+
+    /// <summary>Serves the isolated clip editor stylesheet.</summary>
+    [HttpGet("clipping.css")]
+    [AllowAnonymous]
+    public ActionResult GetClipStyles()
+    {
+        var stream = GetType().Assembly.GetManifestResourceStream($"{typeof(Plugin).Namespace}.js.clipping.css");
+        if (stream is null) return NotFound();
+        Response.Headers.CacheControl = "no-cache, must-revalidate";
+        return new FileStreamResult(stream, "text/css");
     }
 
     /// <summary>

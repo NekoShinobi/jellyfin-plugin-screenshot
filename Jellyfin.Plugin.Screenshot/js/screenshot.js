@@ -6,6 +6,8 @@
 (function () {
     'use strict';
 
+    if (window.ScreenshotCaptureTools) return;
+
     const LOG_PREFIX = '[ScreenshotCapture]';
     const BTN_ID = 'screenshot-capture-btn';
     const DIALOG_ID = 'screenshot-capture-dialog';
@@ -59,6 +61,7 @@
      * Injects the screenshot button before the native settings button in the OSD.
      */
     function addButton() {
+        addClipButton();
         if (document.getElementById(BTN_ID)) return;
 
         const controlsContainer = document.querySelector(
@@ -87,15 +90,67 @@
             }
         });
 
-        settingsBtn.parentElement.insertBefore(btn, settingsBtn);
+        settingsBtn.parentElement.insertBefore(btn, document.getElementById('screenshot-clip-btn') || settingsBtn);
         console.log(LOG_PREFIX, 'Button added to OSD.');
     }
+
+    function addClipButton() {
+        if (document.getElementById('screenshot-clip-btn')) return;
+        const settings = document.querySelector('.videoOsdBottom .btnVideoOsdSettings');
+        if (!settings) return;
+        const button = document.createElement('button');
+        button.id = 'screenshot-clip-btn';
+        button.type = 'button';
+        button.className = 'autoSize paper-icon-button-light';
+        button.setAttribute('is', 'paper-icon-button-light');
+        button.setAttribute('aria-label', 'Create a clip');
+        button.title = 'Create a clip';
+        button.innerHTML = '<span class="largePaperIconButton material-icons" aria-hidden="true">content_cut</span>';
+        button.addEventListener('click', event => {
+            event.preventDefault();
+            event.stopPropagation();
+            closeCaptureOptions();
+            window.JellyfinClip?.open();
+        });
+        settings.before(button);
+    }
+
+    async function getClipContext() {
+        const native = window._mpvVideoPlayerInstance;
+        const itemId = native?._currentPlayOptions?.item?.Id || getCurrentItemId();
+        if (!itemId) throw new Error('Could not identify the playing video.');
+        // Pause before any network calls so the captured anchor cannot drift.
+        const video = document.querySelector('video:not([data-clip-preview])');
+        if (window.jmpNative && native?.pause) native.pause();
+        else video?.pause();
+        const session = await getCurrentSession(itemId);
+        if (!session?.NowPlayingItem?.Id || session.NowPlayingItem.Id.toLowerCase() !== String(itemId).toLowerCase()) {
+            throw new Error('The current playback session is unavailable. Try again in a moment.');
+        }
+        const anchorTicks = await getPositionTicks(itemId, session);
+        const runtimeTicks = Number(session.NowPlayingItem.RunTimeTicks);
+        if (!Number.isSafeInteger(runtimeTicks) || runtimeTicks <= 0
+            || !Number.isSafeInteger(anchorTicks) || anchorTicks < 0 || anchorTicks > runtimeTicks) {
+            throw new Error('Clipping requires a video with a known playback position and duration.');
+        }
+        return {
+            itemId, anchorTicks, runtimeTicks, name: session.NowPlayingItem.Name || 'Video',
+            mediaSourceId: session.PlayState?.MediaSourceId,
+            audioStreamIndex: session.PlayState?.AudioStreamIndex,
+            subtitleStreamIndex: session.PlayState?.SubtitleStreamIndex,
+            server: ApiClient.serverAddress().replace(/\/$/, ''), token: ApiClient.accessToken()
+        };
+    }
+
+    window.ScreenshotCaptureTools = { getClipContext, showToast };
 
     /**
      * Removes the screenshot button when leaving the video page.
      */
     function removeButton() {
         document.getElementById(BTN_ID)?.remove();
+        document.getElementById('screenshot-clip-btn')?.remove();
+        window.JellyfinClip?.close();
         closeCaptureOptions();
     }
 
@@ -481,7 +536,7 @@
         }
     });
 
-    observer.observe(document.body, { childList: true, subtree: false });
+    observer.observe(document.body, { childList: true, subtree: true });
 
     // Also react to hash changes triggered by pushState
     window.addEventListener('hashchange', function () {
