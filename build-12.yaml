@@ -1,9 +1,9 @@
 ---
 name: "Screenshot Capture"
 guid: "a3c9f1d2-4b7e-4f8a-9d0c-1e2b3a4c5d6e"
-version: "2.0.0.0"
-targetAbi: "10.11.0.0"
-framework: "net9.0"
+version: "3.0.0.0"
+targetAbi: "12.0.0.0"
+framework: "net10.0"
 overview: "Adds a screenshot button to the video player OSD. Captures the current frame via FFmpeg and downloads it as JPEG."
 description: >
   Provides a native screenshot capture button in the Jellyfin video player.

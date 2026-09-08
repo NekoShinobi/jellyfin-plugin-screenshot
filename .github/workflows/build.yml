@@ -32,7 +32,7 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '9.0.x'
+          dotnet-version: '10.0.x'
 
       - name: Calculate build version
         id: version
@@ -50,34 +50,31 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "Building Screenshot Capture $version"
 
-      - name: Restore dependencies
-        run: dotnet restore
-
-      - name: Build
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          dotnet build -c Release --no-restore \
-            -p:Version="$VERSION" \
-            -p:AssemblyVersion="$VERSION" \
-            -p:FileVersion="$VERSION" \
-            -p:PluginPackageDir="$RUNNER_TEMP/plugin"
-
-      - name: Create release archive
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
+      - name: Build and package both server versions
         shell: bash
         run: |
           set -euo pipefail
-
-          archive="Jellyfin.Plugin.Screenshot_${VERSION}.zip"
-          test -f "$RUNNER_TEMP/plugin/Jellyfin.Plugin.Screenshot.dll"
-          test -f "$RUNNER_TEMP/plugin/meta.json"
-
           mkdir -p dist
-          (cd "$RUNNER_TEMP/plugin" && zip -r "$GITHUB_WORKSPACE/dist/$archive" .)
-          checksum="$(md5sum "dist/$archive" | cut -d ' ' -f 1 | tr '[:lower:]' '[:upper:]')"
-          printf '%s  %s\n' "$checksum" "$archive" > "dist/$archive.md5"
+          for jellyfin_version in 10.11.0 12.0.0; do
+            base_version="$(dotnet msbuild Jellyfin.Plugin.Screenshot/Jellyfin.Plugin.Screenshot.csproj \
+              -p:JellyfinVersion="$jellyfin_version" -getProperty:Version)"
+            version="${base_version%.*}.${GITHUB_RUN_NUMBER}"
+            package_dir="$RUNNER_TEMP/plugin-$jellyfin_version"
+            dotnet build -c Release \
+              -p:JellyfinVersion="$jellyfin_version" \
+              -p:Version="$version" \
+              -p:AssemblyVersion="$version" \
+              -p:FileVersion="$version" \
+              -p:PluginPackageDir="$package_dir"
+
+            archive="Jellyfin.Plugin.Screenshot_${version}.zip"
+            test -f "$package_dir/Jellyfin.Plugin.Screenshot.dll"
+            jq -e --arg version "$version" --arg abi "$jellyfin_version.0" \
+              '.version == $version and .targetAbi == $abi' "$package_dir/meta.json"
+            (cd "$package_dir" && zip -r "$GITHUB_WORKSPACE/dist/$archive" .)
+            checksum="$(md5sum "dist/$archive" | cut -d ' ' -f 1 | tr '[:lower:]' '[:upper:]')"
+            printf '%s  %s\n' "$checksum" "$archive" > "dist/$archive.md5"
+          done
 
       - name: Upload release artifact
         uses: actions/upload-artifact@v4
@@ -117,14 +114,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          archive="Jellyfin.Plugin.Screenshot_${VERSION}.zip"
           if gh release view "$VERSION" >/dev/null 2>&1; then
-            gh release upload "$VERSION" "dist/$archive" "dist/$archive.md5" --clobber
+            gh release upload "$VERSION" dist/*.zip dist/*.zip.md5 --clobber
             gh release edit "$VERSION" --title "$VERSION" --notes "$CHANGELOG"
           else
             gh release create "$VERSION" \
-              "dist/$archive" \
-              "dist/$archive.md5" \
+              dist/*.zip dist/*.zip.md5 \
               --target "$GITHUB_SHA" \
               --title "$VERSION" \
               --notes "$CHANGELOG"
@@ -137,29 +132,34 @@ jobs:
         run: |
           set -euo pipefail
 
-          archive="Jellyfin.Plugin.Screenshot_${VERSION}.zip"
-          checksum="$(cut -d ' ' -f 1 "dist/$archive.md5")"
-          source_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${VERSION}/${archive}"
-          timestamp="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-          updated_manifest="$(mktemp)"
+          for archive_path in dist/*.zip; do
+            archive="$(basename "$archive_path")"
+            metadata="$(unzip -p "$archive_path" meta.json)"
+            version="$(jq -r '.version' <<< "$metadata")"
+            target_abi="$(jq -r '.targetAbi' <<< "$metadata")"
+            checksum="$(cut -d ' ' -f 1 "$archive_path.md5")"
+            source_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${VERSION}/${archive}"
+            timestamp="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+            updated_manifest="$(mktemp)"
 
-          jq \
-            --arg version "$VERSION" \
-            --arg checksum "$checksum" \
-            --arg sourceUrl "$source_url" \
-            --arg timestamp "$timestamp" \
-            --arg changelog "$CHANGELOG" \
-            '.[0].versions |= ([{
-              changelog: $changelog,
-              targetAbi: "10.11.0.0",
-              version: $version,
-              sourceUrl: $sourceUrl,
-              checksum: $checksum,
-              timestamp: $timestamp
-            }] + map(select(.version != $version)))' \
-            manifest.json > "$updated_manifest"
-
-          mv "$updated_manifest" manifest.json
+            jq \
+              --arg version "$version" \
+              --arg targetAbi "$target_abi" \
+              --arg checksum "$checksum" \
+              --arg sourceUrl "$source_url" \
+              --arg timestamp "$timestamp" \
+              --arg changelog "$CHANGELOG" \
+              '.[0].versions |= ([{
+                changelog: $changelog,
+                targetAbi: $targetAbi,
+                version: $version,
+                sourceUrl: $sourceUrl,
+                checksum: $checksum,
+                timestamp: $timestamp
+              }] + map(select(.version != $version)))' \
+              manifest.json > "$updated_manifest"
+            mv "$updated_manifest" manifest.json
+          done
 
       - name: Commit plugin manifest
         env:
