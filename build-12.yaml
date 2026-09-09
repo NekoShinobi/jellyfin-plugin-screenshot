@@ -1,7 +1,7 @@
 ---
 name: "Screenshot Capture"
 guid: "a3c9f1d2-4b7e-4f8a-9d0c-1e2b3a4c5d6e"
-version: "3.2.3.0"
+version: "3.2.8.0"
 targetAbi: "12.0.0.0"
 framework: "net10.0"
 overview: "Adds a screenshot button to the video player OSD. Captures the current frame via FFmpeg and downloads it as JPEG."
@@ -16,4 +16,4 @@ owner: "NekoShinobi"
 artifacts:
 - "Jellyfin.Plugin.Screenshot.dll"
 changelog: >
-  Speed up clip previews with early resizing, a 24 fps cap, and faster encoding while preserving export settings.
+  Enforce user library, playback, and download permissions for screenshots and alternate clip sources.

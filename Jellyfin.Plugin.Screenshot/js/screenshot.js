@@ -435,8 +435,9 @@
             'overflow-wrap:anywhere',
             'white-space:pre-wrap'
         ].join(';');
-        document.body.appendChild(toast);
+        (document.fullscreenElement || document.body).appendChild(toast);
         setTimeout(() => toast.remove(), duration);
+        return toast;
     }
 
     async function showToast(message) {
@@ -457,6 +458,32 @@
         }
 
         showFallbackToast(message);
+    }
+
+    function downloadBrowserScreenshot(blob, filename) {
+        const blobUrl = URL.createObjectURL(blob);
+        // Keep a real, clickable save action after the async render. Browsers may
+        // ignore the automatic click; retrying must not render the image again.
+        const toast = showFallbackToast(`Screenshot ready: ${filename}.\nCheck your browser’s downloads, or save it here.`, 120_000);
+        const link = document.createElement('a');
+        link.href = blobUrl;
+        link.download = filename;
+        link.textContent = 'Download screenshot';
+        link.style.cssText = 'display:inline-block;margin-top:.5em;color:inherit;text-decoration:underline;cursor:pointer;pointer-events:auto';
+        toast.append(document.createElement('br'), link);
+        // Player shortcuts must not cancel the link's default download action.
+        for (const type of ['click', 'keydown', 'keyup']) {
+            toast.addEventListener(type, event => event.stopPropagation());
+        }
+        const release = () => {
+            clearTimeout(timer);
+            URL.revokeObjectURL(blobUrl);
+            window.removeEventListener('pagehide', release);
+        };
+        // Give downloads time to start after the save action disappears.
+        const timer = setTimeout(release, 180_000);
+        window.addEventListener('pagehide', release, { once: true });
+        link.click();
     }
 
     function downloadWithResult(url) {
@@ -565,7 +592,7 @@
                 showToast(`Screenshot download started: ${filename}. This Desktop version does not report the saved path.`);
                 console.log(LOG_PREFIX, '✓ startDownload called (CEF path)');
             } else {
-                showToast(`Creating screenshot as ${filename}`);
+                await showToast(`Creating screenshot as ${filename}`);
 
                 const response = await fetch(url);
                 if (!response.ok) {
@@ -573,18 +600,8 @@
                     throw new Error(detail || `Screenshot request failed (${response.status})`);
                 }
 
-                const blobUrl = URL.createObjectURL(await response.blob());
-                const link = document.createElement('a');
-                link.href = blobUrl;
-                link.download = filename;
-                link.style.display = 'none';
-                document.body.appendChild(link);
-                link.click();
-                link.remove();
-                setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
-
-                showToast(`Screenshot download started: ${filename}. Check your browser’s downloads for the saved location.`);
-                console.log(LOG_PREFIX, '✓ screenshot response downloaded (browser path)');
+                downloadBrowserScreenshot(await response.blob(), filename);
+                console.log(LOG_PREFIX, '✓ screenshot ready; browser download requested');
             }
         } catch (err) {
             console.error(LOG_PREFIX, 'Capture failed:', err);

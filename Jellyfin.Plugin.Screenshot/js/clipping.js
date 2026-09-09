@@ -17,6 +17,15 @@
     const short = seconds => `${Number(seconds.toFixed(1))}s`;
     const value = (object, name) => object[name] ?? object[name[0].toLowerCase() + name.slice(1)];
 
+    const MP4_PREVIEW = 'video/mp4; codecs="avc1.42E01E, mp4a.40.2"';
+    const WEBM_PREVIEW = 'video/webm; codecs="vp8, opus"';
+
+    function previewFormat(video) {
+        if (video.canPlayType(MP4_PREVIEW)) return 'mp4';
+        if (video.canPlayType(WEBM_PREVIEW)) return 'webm';
+        throw new Error('This client cannot play either supported preview format. Open the clip editor in a browser with H.264/AAC or VP8/Opus playback.');
+    }
+
     function clipUrl(state, id, download = false) {
         const url = new URL(`${state.context.server}/Screenshot/clips/${encodeURIComponent(id)}`);
         // Video elements and native downloads cannot attach an Authorization header.
@@ -54,7 +63,7 @@
                     EndTicks: Math.round((preview ? state.windowEnd : state.end) * TICKS),
                     AudioStreamIndex: context.audioStreamIndex,
                     SubtitleStreamIndex: state.$('#jfc-subtitles').checked ? context.subtitleStreamIndex : null,
-                    Preview: preview
+                    Preview: preview, PreviewFormat: preview ? state.previewFormat : 'mp4'
                 })
             });
             if (!response.ok) {
@@ -150,7 +159,13 @@
 
     function clock(state) {
         const absolute = state.preview ? state.preview.start + state.video.currentTime : state.start;
-        state.$('.jfc-preview-time').textContent = time(absolute);
+        state.$('.jfc-preview-time-value').textContent = time(absolute);
+        const scrubber = state.$('.jfc-scrubber');
+        scrubber.disabled = !state.ready || state.busy;
+        scrubber.setAttribute('aria-valuemin', state.windowStart);
+        scrubber.setAttribute('aria-valuemax', state.windowEnd);
+        scrubber.setAttribute('aria-valuenow', Math.max(state.windowStart, Math.min(state.windowEnd, absolute)));
+        scrubber.setAttribute('aria-valuetext', time(absolute));
         const width = state.windowEnd - state.windowStart;
         state.$('.jfc-playhead').style.left = `${Math.max(0, Math.min(100, (absolute - state.windowStart) / width * 100))}%`;
         const paused = state.video.paused;
@@ -245,6 +260,7 @@
         if (previous) await release(state, previous.id);
         if (current !== state) return;
         try {
+            state.previewFormat = state.previewFormat || previewFormat(state.video);
             const preview = await create(state, true);
             state.preview = preview;
             if (Math.abs(preview.start - state.windowStart) > .001 || Math.abs(preview.end - state.windowEnd) > .001) {
@@ -338,14 +354,14 @@
                 <div class="jfc-body"><div class="jfc-preview">
                     <video data-clip-preview playsinline preload="auto"></video>
                     <button class="jfc-play" aria-label="Preview selected clip" disabled>${icon('play_arrow')}</button>
-                    <button class="jfc-mute" aria-label="Mute clip preview">${icon('volume_up')}</button><span class="jfc-preview-time"></span>
+                    <button class="jfc-mute" aria-label="Mute clip preview">${icon('volume_up')}</button><span class="jfc-preview-time"><span class="jfc-preview-time-label">Position</span><span class="jfc-preview-time-value"></span></span>
                     <div class="jfc-loading"><span class="jfc-spinner" aria-hidden="true"></span><span class="jfc-loading-label">Preparing your preview…</span><button class="jfc-retry" hidden>Retry preview</button></div>
                 </div><div class="jfc-heading"><span>Trim anywhere in this window. Requested at <strong class="jfc-moment"></strong>.</span><span class="jfc-duration"></span></div>
                 <fieldset class="jfc-controls" disabled aria-label="Clip selection"><div class="jfc-timeline-section">
                     <div class="jfc-scale"><span class="jfc-window-start"></span><span class="jfc-window-end"></span><span class="jfc-anchor-label">Your moment</span></div>
-                    <div class="jfc-timeline"><div class="jfc-frames" aria-hidden="true"></div><div class="jfc-left"></div><div class="jfc-right"></div><div class="jfc-selection"></div><div class="jfc-anchor"></div><div class="jfc-playhead"></div>
+                    <div class="jfc-timeline"><div class="jfc-frames" aria-hidden="true"></div><div class="jfc-left"></div><div class="jfc-right"></div><div class="jfc-selection"></div><div class="jfc-anchor"></div><button class="jfc-scrubber" role="slider" aria-label="Preview position" aria-orientation="horizontal"></button><div class="jfc-playhead"></div>
                         <button class="jfc-handle jfc-start" role="slider" aria-label="Clip start"></button><button class="jfc-handle jfc-end" role="slider" aria-label="Clip end"></button></div>
-                    <p class="jfc-hint">Drag the handles to trim. Click the filmstrip to scrub.</p></div>
+                    <p class="jfc-hint">Drag the handles to trim. Click or drag the filmstrip to scrub.</p></div>
                     <div class="jfc-fields">
                         <div class="jfc-field"><label for="jfc-start">Starting point</label><div class="jfc-input-row"><button data-jfc-adjust="start:-5" aria-label="Move start 5 seconds earlier">−</button><input id="jfc-start" type="number" min="0" max="60" step="0.1"><span class="jfc-unit">sec</span><button data-jfc-adjust="start:5" aria-label="Move start 5 seconds later">+</button></div><span class="jfc-boundary jfc-start-time"></span></div>
                         <div class="jfc-field"><label for="jfc-duration">Duration</label><div class="jfc-input-row"><button data-jfc-adjust="duration:-5" aria-label="Shorten duration by 5 seconds">−</button><input id="jfc-duration" type="number" min="0" max="60" step="0.1"><span class="jfc-unit">sec</span><button data-jfc-adjust="duration:5" aria-label="Extend duration by 5 seconds">+</button></div><span class="jfc-boundary jfc-end-time"></span></div>
@@ -389,7 +405,21 @@
                 state.busy = false; state.ready = true; state.$('.jfc-loading').hidden = true;
                 status(state, ''); update(state, true); thumbnails(state, state.preview);
             });
-            state.video.addEventListener('error', () => { if (current === state && state.preview) failedPreview(state, 'The preview could not load or has expired. Retry to prepare it again.'); });
+            state.video.addEventListener('error', () => {
+                if (current !== state || !state.preview) return;
+                const code = state.video.error?.code;
+                if ((code === 3 || code === 4) && state.previewFormat === 'mp4' && state.video.canPlayType(WEBM_PREVIEW)) {
+                    // Some embedded browsers advertise MP4 support but cannot decode it.
+                    // Retry once using open codecs; exports remain H.264/AAC MP4.
+                    state.previewFormat = 'webm';
+                    prepare(state);
+                    return;
+                }
+                const message = code === 3 || code === 4
+                    ? `This client could not decode the ${state.previewFormat.toUpperCase()} preview. Try updating the client or opening the editor in a web browser.`
+                    : 'The preview could not be downloaded. Check the server connection and sign-in, then retry.';
+                failedPreview(state, message);
+            });
             for (const event of ['play', 'pause', 'seeked', 'timeupdate']) state.video.addEventListener(event, () => {
                 if (state.preview && !state.video.paused && state.video.currentTime >= state.end - state.preview.start) state.video.pause();
                 clock(state);
@@ -415,11 +445,45 @@
                     event.preventDefault(); setEndpoint(state, side, target);
                 };
             }
-            state.$('.jfc-timeline').onpointerdown = event => {
-                if (!state.ready || state.busy || event.target.closest('.jfc-handle')) return;
+            const scrubber = state.$('.jfc-scrubber');
+            let scrubPointer = null;
+            const seekPreview = absolute => {
+                if (!state.ready || state.busy || !state.preview) return;
+                const position = Math.max(state.windowStart, Math.min(state.windowEnd, absolute));
+                state.video.pause();
+                state.video.currentTime = Math.max(0, Math.min(state.video.duration, position - state.preview.start));
+                clock(state);
+            };
+            const scrub = event => {
                 const box = state.$('.jfc-timeline').getBoundingClientRect();
-                const absolute = state.windowStart + (event.clientX - box.left) / box.width * (state.windowEnd - state.windowStart);
-                state.video.pause(); state.video.currentTime = Math.max(0, Math.max(state.start, Math.min(state.end, absolute)) - state.preview.start);
+                if (box.width > 0) seekPreview(state.windowStart + (event.clientX - box.left) / box.width * (state.windowEnd - state.windowStart));
+            };
+            scrubber.onpointerdown = event => {
+                if (!state.ready || state.busy || event.button !== 0 || !event.isPrimary || scrubPointer !== null) return;
+                event.preventDefault(); event.stopPropagation();
+                scrubber.focus({ preventScroll: true });
+                scrubber.setPointerCapture(event.pointerId);
+                scrubPointer = event.pointerId;
+                scrubber.classList.add('jfc-scrubbing');
+                scrub(event);
+            };
+            scrubber.onpointermove = event => { if (event.pointerId === scrubPointer) scrub(event); };
+            const finishScrub = event => {
+                if (event.pointerId !== scrubPointer) return;
+                scrubPointer = null;
+                scrubber.classList.remove('jfc-scrubbing');
+                if (scrubber.hasPointerCapture(event.pointerId)) scrubber.releasePointerCapture(event.pointerId);
+            };
+            scrubber.onpointerup = event => { if (event.pointerId === scrubPointer) scrub(event); finishScrub(event); };
+            scrubber.onpointercancel = scrubber.onlostpointercapture = finishScrub;
+            scrubber.onkeydown = event => {
+                let position = state.preview ? state.preview.start + state.video.currentTime : state.start;
+                if (event.key === 'ArrowLeft') position -= event.shiftKey ? 5 : 1;
+                else if (event.key === 'ArrowRight') position += event.shiftKey ? 5 : 1;
+                else if (event.key === 'Home') position = state.windowStart;
+                else if (event.key === 'End') position = state.windowEnd;
+                else return;
+                event.preventDefault(); seekPreview(position);
             };
             (document.fullscreenElement || document.body).append(dialog);
             document.body.classList.add('jfc-open');

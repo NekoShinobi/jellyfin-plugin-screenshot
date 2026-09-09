@@ -12,11 +12,20 @@ drag either handle anywhere within that window. “Your moment” is a reference
 a selection may sit entirely before or after it. Moving the starting point preserves
 the duration until it reaches the window's end. Drag the timeline handles, enter times, use presets, or trim with arrow keys
 (Shift changes by five seconds; Home/End move to the available limits).
+Click or drag the thumbnail reel to scrub the preview anywhere in the fixed window
+without changing the trim selection. Scrubbing pauses playback and stays paused on
+release. Focus the reel to seek with Left/Right arrows, Shift for five seconds, or
+Home/End for the window boundaries. The bottom-right Position badge shows the
+current source timestamp, and editor controls darken on hover.
 
-The server prepares an H.264/AAC preview of the surrounding window at up to
+The server prepares a preview of the surrounding window at up to
 960×540 and 24 fps, retaining lower source frame rates. Preview frames are resized
 before HDR tone mapping and text subtitle rendering, then encoded with the fastest
-software preset. Frequent keyframes help seeking and thumbnail extraction. Preview
+software preset for MP4. Clients without H.264/AAC playback (including some CEF
+builds used by Jellium/Desktop) request VP8/Opus WebM using a realtime encoder.
+The editor checks HTML video codec support before rendering and retries MP4 decode
+failures once with WebM when supported. MP4 exports keep H.264/AAC regardless of
+preview format. Frequent keyframes help seeking and thumbnail extraction. Preview
 compression is less efficient, so files can be larger within the existing bitrate
 limit; export quality and frame rate are unchanged. The complete window still needs
 to render before playback, so preparation time depends on server CPU and source
@@ -43,7 +52,7 @@ user creates additional clips. The editor respects existing download permissions
 ## Requirements
 
 - Jellyfin 10.11.x or 12.x (install the matching build below)
-- Jellyfin FFmpeg configured in Jellyfin (H.264/libx264, AAC, libass, and zscale/tonemap for HDR)
+- Jellyfin FFmpeg configured in Jellyfin (H.264/libx264, AAC, libvpx/libopus for WebM previews, libass, and zscale/tonemap for HDR)
 - [jellyfin-plugin-file-transformation](https://github.com/jellyfin/jellyfin-plugin-file-transformation) (optional, for script injection without touching `index.html`)
 
 ## Desktop Client
@@ -90,8 +99,8 @@ dotnet build -c Release -p:JellyfinVersion=12.0.0
 
 The packaged DLL and `meta.json` are written to:
 
-- `Jellyfin.Plugin.Screenshot/bin/Release/net9.0/Screenshot Capture_2.2.3.0/`
-- `Jellyfin.Plugin.Screenshot/bin/Release/net10.0/Screenshot Capture_3.2.3.0/`
+- `Jellyfin.Plugin.Screenshot/bin/Release/net9.0/Screenshot Capture_2.2.8.0/`
+- `Jellyfin.Plugin.Screenshot/bin/Release/net10.0/Screenshot Capture_3.2.8.0/`
 
 Intermediate files are isolated by server version, so switching between builds does
 not require cleaning. `build.yaml` describes the default 10.11 package;
@@ -129,7 +138,7 @@ permissions, ownership, and file cleanup. Without these variables that test is s
 
 `tests/browser-check.py` uses Playwright and an isolated HTTP fixture with the actual
 injected plugin scripts. Set `CLIP_FIXTURE_VIDEO` to a 120-second H.264/AAC MP4 and
-optionally `CLIP_BROWSER_OUTPUT` for screenshots and results. It verifies preview
+`CLIP_FIXTURE_WEBM` pointing to an equivalent VP8/Opus WebM (defaults to the MP4 fixture path with a `.webm` extension), and optionally `CLIP_BROWSER_OUTPUT` for screenshots and results. It verifies preview
 playback, filmstrip generation, trim bounds, keyboard/pointer controls, fixed anchors,
 selected tracks, browser/native downloads, retry/cancellation, and mobile media bounds.
 This fixture does not replace testing against a deployed Jellyfin server.
@@ -150,6 +159,16 @@ Preview controls stay visible during playback, including when the underlying pla
 
 With the updated Jellyfin Desktop download bridge, the toast shows **Screenshot saved to:** followed by the actual full path after the download completes. This includes folder or filename changes in the save dialog. Cancellation and failed downloads have separate messages. Long paths wrap and remain visible for ten seconds.
 
-Standard browsers do not expose the local download destination or completion to page scripts. Their toast shows the requested filename and directs you to the browser's download history. Older Desktop clients that only expose `startDownload` also keep working, but cannot report the full path. Installing the plugin alone does not add the required Desktop capability.
+Standard browsers do not expose the local download destination or completion to page scripts. After preparing the image, the plugin attempts the browser download and shows the requested filename with a **Download screenshot** link for two minutes. If the automatic download does not start, click that link to save the same image without rendering again. The link stays inside the fullscreen player when applicable, and its click is isolated from player shortcuts. Browser feedback says the image is ready rather than claiming it has been saved; use the browser's download history for the actual destination. Older Desktop clients that only expose `startDownload` also keep working, but cannot report the full path. Installing the plugin alone does not add the required Desktop capability.
 
 The accompanying Desktop change exposes `jmpNative.startDownloadWithResult(url, requestId)` and emits `jellyfin-download-result` with `requestId`, `status` (`complete`, `cancelled`, or `failed`), and `fullPath` on completion. The plugin ignores unrelated/duplicate events. Desktop limits pending requests and delivers results only to the initiating page.
+
+Preview format is selected with `HTMLMediaElement.canPlayType`, using `PreviewFormat: "mp4"` or `"webm"` in preview requests. Older clients default to MP4. Unsupported clients receive a codec-specific error; network failures no longer claim the preview expired. WebM support is covered by real FFmpeg output tests and browser playback with simulated CEF codec availability; the packaged Jellium application has not been run in this workspace.
+
+### Capture authorization
+
+Screenshots and clips require an authenticated Jellyfin user with playback and content-download permission, visibility of the requested item under Jellyfin library/parental rules, and an enabled account. Knowing an item ID does not grant access. Userless API keys cannot capture media.
+
+An explicitly selected media source must belong to the item. Alternate versions are independently resolved and checked for access to their library; their paths must match the registered version. Permissions are checked again after rendering. Saved clip requests check ownership and current access to both the requested item and selected version on every GET. Capture responses are not cacheable, and rendering exceptions are logged on the server rather than exposing FFmpeg output to the caller.
+
+Security update: releases before 2.2.8.0 / 3.2.8.0 authenticated screenshot requests without enforcing item-level permissions. Update the server plugin to close that bypass. This focused authorization review is not a full penetration test; screenshot requests still lack a shared concurrency/rate limit, so authorized users can cause excessive rendering load.

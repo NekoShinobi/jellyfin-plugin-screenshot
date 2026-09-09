@@ -23,8 +23,9 @@ internal static class ClipEncoder
     internal static ProcessStartInfo Build(
         string encoder, string input, string output, ClipRange range,
         int videoIndex, int? audioIndex, bool preview,
-        string? escapedTextSubtitle, string? bitmapSubtitle, bool hdr)
+        string? escapedTextSubtitle, string? bitmapSubtitle, bool hdr, bool webmPreview = false)
     {
+        var webm = preview && webmPreview;
         var info = new ProcessStartInfo(encoder)
         {
             UseShellExecute = false,
@@ -47,7 +48,7 @@ internal static class ClipEncoder
         }
         if (hdr)
         {
-            // Produce a browser-compatible SDR MP4 from PQ/HLG sources.
+            // Produce browser-compatible SDR from PQ/HLG sources.
             filters.Add("zscale=t=linear:npl=100,format=gbrpf32le,zscale=p=bt709,tonemap=tonemap=hable:desat=0,zscale=t=bt709:m=bt709:r=tv");
         }
         if (escapedTextSubtitle is not null) filters.Add($"subtitles=f='{escapedTextSubtitle}'");
@@ -64,13 +65,24 @@ internal static class ClipEncoder
         if (audioIndex.HasValue)
         {
             Add("-map", $"0:{audioIndex.Value}", "-af", $"asetpts=PTS-{Seconds(range.StartTicks)}/TB",
-                "-c:a", "aac", "-b:a", "192k", "-ac", "2");
+                "-c:a", webm ? "libopus" : "aac", "-b:a", webm ? "96k" : "192k", "-ac", "2");
         }
         else Add("-an");
         if (preview) Add("-g", "24");
-        Add("-t", Seconds(range.DurationTicks), "-c:v", "libx264", "-threads", "2", "-preset", preview ? "ultrafast" : "veryfast",
-            "-crf", preview ? "27" : "20", "-maxrate", preview ? "2M" : "20M", "-bufsize", preview ? "4M" : "40M",
-            "-pix_fmt", "yuv420p", "-sn", "-map_metadata", "-1", "-map_chapters", "-1", "-movflags", "+faststart", "-y", output);
+        Add("-t", Seconds(range.DurationTicks), "-threads", "2");
+        if (webm)
+        {
+            // CEF builds without H.264/AAC can decode VP8/Opus in HTML video.
+            Add("-c:v", "libvpx", "-deadline", "realtime", "-cpu-used", "8", "-lag-in-frames", "0",
+                "-b:v", "1500k", "-crf", "10", "-maxrate", "2M", "-bufsize", "4M");
+        }
+        else
+        {
+            Add("-c:v", "libx264", "-preset", preview ? "ultrafast" : "veryfast",
+                "-crf", preview ? "27" : "20", "-maxrate", preview ? "2M" : "20M", "-bufsize", preview ? "4M" : "40M",
+                "-movflags", "+faststart");
+        }
+        Add("-pix_fmt", "yuv420p", "-sn", "-map_metadata", "-1", "-map_chapters", "-1", "-y", output);
         return info;
     }
 

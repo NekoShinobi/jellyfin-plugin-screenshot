@@ -9,7 +9,10 @@ using Microsoft.Extensions.Logging;
 
 namespace Jellyfin.Plugin.Screenshot.Services;
 
-internal sealed record StoredClip(Guid Id, Guid UserId, Guid ItemId, string Path, string Filename, ClipRange Range, bool Preview, DateTime Expires);
+internal sealed record StoredClip(Guid Id, Guid UserId, Guid ItemId, string Path, string Filename, ClipRange Range, bool Preview, DateTime Expires, Guid SourceItemId)
+{
+    public string ContentType => System.IO.Path.GetExtension(Path) == ".webm" ? "video/webm" : "video/mp4";
+}
 internal sealed class ClipBusyException : Exception { }
 
 /// <summary>Bounded rendering and temporary storage for previews and downloadable clips.</summary>
@@ -36,8 +39,11 @@ public sealed class ClipService : IDisposable
         _timer = new Timer(_ => Cleanup(), null, TimeSpan.Zero, TimeSpan.FromMinutes(1));
     }
 
-    internal async Task<StoredClip> CreateAsync(Guid userId, Video item, MediaSourceInfo source, ClipRequest request, ClipRange range, CancellationToken token)
+    internal async Task<StoredClip> CreateAsync(Guid userId, Video item, MediaSourceInfo source, ClipRequest request, ClipRange range, CancellationToken token, Guid sourceItemId = default)
     {
+        if (request.PreviewFormat is not ("mp4" or "webm")) throw new ArgumentException("Unsupported preview format.");
+        var webm = request.Preview && request.PreviewFormat == "webm";
+        var extension = webm ? "webm" : "mp4";
         lock (_gate)
         {
             while (_clips.Values.Count(c => c.UserId == userId) >= 3)
@@ -52,7 +58,7 @@ public sealed class ClipService : IDisposable
             _active.Add(userId);
         }
         var id = Guid.NewGuid();
-        var output = System.IO.Path.Combine(_directory, $"{id:N}.mp4");
+        var output = System.IO.Path.Combine(_directory, $"{id:N}.{extension}");
         var assFile = System.IO.Path.Combine(_directory, $"{id:N}.ass");
         var retained = false;
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token, _shutdown.Token);
@@ -87,7 +93,7 @@ public sealed class ClipService : IDisposable
             var hdr = string.Equals(video.ColorTransfer, "smpte2084", StringComparison.OrdinalIgnoreCase)
                 || string.Equals(video.ColorTransfer, "arib-std-b67", StringComparison.OrdinalIgnoreCase);
             var info = ClipEncoder.Build(_encoder.EncoderPath, source.Path, output, range,
-                ClipEncoder.InputIndex(source, video), audio is null ? null : ClipEncoder.InputIndex(source, audio), request.Preview, textSubtitle, bitmapSubtitle, hdr);
+                ClipEncoder.InputIndex(source, video), audio is null ? null : ClipEncoder.InputIndex(source, audio), request.Preview, textSubtitle, bitmapSubtitle, hdr, webm);
             _logger.LogInformation("Starting FFmpeg for clip {ClipId}: {Width}x{Height}, HDR={Hdr}, subtitles={Subtitles}", id, video.Width, video.Height, hdr, request.SubtitleStreamIndex.HasValue);
             await ClipEncoder.RunAsync(info, timeout.Token).ConfigureAwait(false);
             if (!File.Exists(output) || new FileInfo(output).Length == 0) throw new InvalidOperationException("FFmpeg produced no clip.");
@@ -95,8 +101,8 @@ public sealed class ClipService : IDisposable
             var safeName = string.Concat(item.Name.Select(c => char.IsControl(c) || "<>:\"/\\|?*".Contains(c) ? '_' : c)).Trim().TrimEnd('.');
             if (safeName.Length > 100) safeName = safeName[..100];
             if (safeName.Length == 0) safeName = "Clip";
-            var filename = $"{safeName}-{TimeSpan.FromTicks(range.StartTicks).ToString(@"hh\-mm\-ss")}-{TimeSpan.FromTicks(range.EndTicks).ToString(@"hh\-mm\-ss")}.mp4";
-            var clip = new StoredClip(id, userId, item.Id, output, filename, range, request.Preview, DateTime.UtcNow.AddMinutes(30));
+            var filename = $"{safeName}-{TimeSpan.FromTicks(range.StartTicks).ToString(@"hh\-mm\-ss")}-{TimeSpan.FromTicks(range.EndTicks).ToString(@"hh\-mm\-ss")}.{extension}";
+            var clip = new StoredClip(id, userId, item.Id, output, filename, range, request.Preview, DateTime.UtcNow.AddMinutes(30), sourceItemId == Guid.Empty ? item.Id : sourceItemId);
             lock (_gate)
             {
                 timeout.Token.ThrowIfCancellationRequested();

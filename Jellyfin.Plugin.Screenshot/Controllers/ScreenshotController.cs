@@ -8,6 +8,7 @@ using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Model.Dto;
+using Jellyfin.Plugin.Screenshot.Services;
 using MediaBrowser.Model.Entities;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -31,6 +32,7 @@ public class ScreenshotController : ControllerBase
     private static readonly TimeSpan FfmpegTimeout = TimeSpan.FromSeconds(45);
 
     private readonly ILibraryManager _libraryManager;
+    private readonly IUserManager _userManager;
     private readonly IMediaSourceManager _mediaSourceManager;
     private readonly IMediaEncoder _mediaEncoder;
     private readonly ISubtitleEncoder _subtitleEncoder;
@@ -41,12 +43,14 @@ public class ScreenshotController : ControllerBase
     /// </summary>
     public ScreenshotController(
         ILibraryManager libraryManager,
+        IUserManager userManager,
         IMediaSourceManager mediaSourceManager,
         IMediaEncoder mediaEncoder,
         ISubtitleEncoder subtitleEncoder,
         ILogger<ScreenshotController> logger)
     {
         _libraryManager = libraryManager;
+        _userManager = userManager;
         _mediaSourceManager = mediaSourceManager;
         _mediaEncoder = mediaEncoder;
         _subtitleEncoder = subtitleEncoder;
@@ -117,16 +121,19 @@ public class ScreenshotController : ControllerBase
             return BadRequest("positionTicks cannot be negative.");
         }
 
-        var item = _libraryManager.GetItemById<Video>(itemId);
-        if (item is null)
-        {
-            _logger.LogWarning("Item not found: {Id}", itemId);
-            return NotFound("Item not found.");
-        }
+        Response.Headers.CacheControl = "private, no-store";
+        var userId = MediaCaptureAccess.UserId(User);
+        var user = userId == Guid.Empty ? null : _userManager.GetUserById(userId);
+        var item = user is null ? null : _libraryManager.GetItemById<Video>(itemId);
+        if (!MediaCaptureAccess.Allowed(item, user))
+            return NotFound("This video is unavailable or you do not have download permission.");
 
-        var mediaSources = _mediaSourceManager.GetStaticMediaSources(item, false);
-        var mediaSource = FindMediaSource(mediaSources, mediaSourceId, item.Path);
-        var inputPath = mediaSource?.Path ?? item.Path;
+        var mediaSources = _mediaSourceManager.GetStaticMediaSources(item!, false, user);
+        var mediaSource = FindMediaSource(mediaSources, mediaSourceId, item!.Path);
+        if (mediaSource is null) return BadRequest("The selected media source is unavailable.");
+        var sourceItem = MediaCaptureAccess.SourceVideo(_libraryManager, item, mediaSource, user!);
+        if (sourceItem is null) return NotFound("This video is unavailable or you do not have download permission.");
+        var inputPath = mediaSource.Path;
 
         _logger.LogInformation(
             "Item resolved — Name={Name} Path={Path} Container={Container} MediaSourceId={MediaSourceId}",
@@ -244,6 +251,11 @@ public class ScreenshotController : ControllerBase
             var filename = BuildFilename(item, offset);
             _logger.LogInformation("Returning {Bytes} bytes as '{Filename}'", bytes.Length, filename);
 
+            // Access may have been revoked while extracting subtitles or the image.
+            var currentUser = _userManager.GetUserById(userId);
+            if (!MediaCaptureAccess.Allowed(_libraryManager.GetItemById<Video>(item.Id), currentUser)
+                || !MediaCaptureAccess.Allowed(_libraryManager.GetItemById<Video>(sourceItem.Id), currentUser))
+                return NotFound("This video is unavailable or you do not have download permission.");
             return File(bytes, "image/jpeg", filename);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -262,7 +274,7 @@ public class ScreenshotController : ControllerBase
         catch (Exception ex)
         {
             _logger.LogError(ex, "Frame extraction failed for item {Name}", item.Name);
-            return StatusCode(500, $"Frame extraction failed: {ex.Message}");
+            return StatusCode(500, "Frame extraction failed. Check the Jellyfin server log for details.");
         }
         finally
         {
@@ -498,12 +510,8 @@ public class ScreenshotController : ControllerBase
     {
         if (!string.IsNullOrEmpty(mediaSourceId))
         {
-            var selectedSource = mediaSources.FirstOrDefault(source =>
+            return mediaSources.FirstOrDefault(source =>
                 string.Equals(source.Id, mediaSourceId, StringComparison.OrdinalIgnoreCase));
-            if (selectedSource is not null)
-            {
-                return selectedSource;
-            }
         }
 
         return mediaSources.FirstOrDefault(source =>

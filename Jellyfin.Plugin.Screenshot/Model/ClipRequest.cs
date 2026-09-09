@@ -20,6 +20,8 @@ public sealed class ClipRequest
     public int? AudioStreamIndex { get; set; }
     public int? SubtitleStreamIndex { get; set; }
     public bool Preview { get; set; }
+    [RegularExpression("^(mp4|webm)$")]
+    public string PreviewFormat { get; set; } = "mp4";
 }
 
 internal readonly record struct ClipRange(long StartTicks, long EndTicks)

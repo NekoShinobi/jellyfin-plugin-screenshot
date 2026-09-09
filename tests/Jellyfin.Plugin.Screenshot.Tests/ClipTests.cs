@@ -126,11 +126,12 @@ public sealed class ClipTests
         try
         {
             foreach (var rate in new[] { 12, 30 })
+            foreach (var format in new[] { "mp4", "webm" })
             {
                 var source = Path.Combine(root, $"hdr-{rate}.mkv");
-                var preview = Path.Combine(root, $"preview-{rate}.mp4");
+                var preview = Path.Combine(root, $"preview-{rate}.{format}");
                 await Run(ffmpeg, "-hide_banner", "-loglevel", "error", "-filter_threads", "2", "-f", "lavfi", "-i", $"testsrc2=size=1280x720:rate={rate}:duration=3", "-c:v", "libx264", "-preset", "ultrafast", "-threads", "2", "-vf", "format=yuv420p10le,setparams=color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc", "-y", source);
-                await ClipEncoder.RunAsync(ClipEncoder.Build(ffmpeg, source, preview, new ClipRange(Second / 2, 5 * Second / 2), 0, null, true, null, null, true), CancellationToken.None);
+                await ClipEncoder.RunAsync(ClipEncoder.Build(ffmpeg, source, preview, new ClipRange(Second / 2, 5 * Second / 2), 0, null, true, null, null, true, format == "webm"), CancellationToken.None);
                 var probe = JsonDocument.Parse(await Run(ffprobe, "-v", "error", "-show_streams", "-show_format", "-of", "json", preview));
                 var video = probe.RootElement.GetProperty("streams")[0];
                 Assert.Equal(960, video.GetProperty("width").GetInt32());
@@ -229,17 +230,80 @@ public sealed class ClipTests
             Assert.True(File.Exists(stored.Path));
             var file = Assert.IsType<FileStreamResult>(controller.Get(id));
             Assert.True(file.EnableRangeProcessing); await file.FileStream.DisposeAsync();
+            Assert.Equal("video/mp4", file.ContentType);
+            request.PreviewFormat = "webm";
+            var webmCreated = Assert.IsType<OkObjectResult>(await controller.Create(request, CancellationToken.None));
+            var webmId = JsonSerializer.SerializeToElement(webmCreated.Value).GetProperty("Id").GetGuid();
+            var webmClip = Assert.IsType<StoredClip>(clips.Find(webmId, owner.Id));
+            Assert.EndsWith(".webm", webmClip.Filename);
+            var webmFile = Assert.IsType<FileStreamResult>(controller.Get(webmId));
+            Assert.Equal("video/webm", webmFile.ContentType);
+            Assert.True(webmFile.EnableRangeProcessing);
+            await webmFile.FileStream.DisposeAsync();
+            var webmProbe = JsonDocument.Parse(await Run(ffprobe, "-v", "error", "-show_streams", "-show_format", "-of", "json", webmClip.Path));
+            var webmStreams = webmProbe.RootElement.GetProperty("streams").EnumerateArray().ToArray();
+            Assert.Contains(webmStreams, stream => stream.GetProperty("codec_name").GetString() == "vp8");
+            Assert.Contains(webmStreams, stream => stream.GetProperty("codec_name").GetString() == "opus");
+            Assert.Equal("4:3", webmStreams.Single(stream => stream.GetProperty("codec_type").GetString() == "video").GetProperty("display_aspect_ratio").GetString());
+            Assert.InRange(double.Parse(webmProbe.RootElement.GetProperty("format").GetProperty("duration").GetString()!, System.Globalization.CultureInfo.InvariantCulture), 1.95, 2.1);
+            clips.Remove(webmId, owner.Id);
+            // Linked versions need their own permission check, including on later GETs.
+            var alternatePath = Path.Combine(root, "alternate.mkv"); File.Copy(input, alternatePath);
+            var alternate = new Mock<Video> { CallBase = true };
+            alternate.Object.Id = Guid.NewGuid(); alternate.Object.Path = alternatePath;
+            alternate.Setup(v => v.IsVisibleStandalone(owner)).Returns(true);
+            library.Setup(l => l.GetItemById<Video>(alternate.Object.Id)).Returns(alternate.Object);
+            var alternateSource = new MediaSourceInfo { Id = alternate.Object.Id.ToString("N"), Path = alternatePath, RunTimeTicks = 8 * Second, MediaStreams = source.MediaStreams };
+            sources.Setup(m => m.GetStaticMediaSources(item.Object, false, owner)).Returns(new[] { source, alternateSource });
+            request.MediaSourceId = alternateSource.Id;
+            var alternateResult = Assert.IsType<OkObjectResult>(await controller.Create(request, CancellationToken.None));
+            var alternateId = JsonSerializer.SerializeToElement(alternateResult.Value).GetProperty("Id").GetGuid();
+            Assert.Equal(alternate.Object.Id, clips.Find(alternateId, owner.Id)!.SourceItemId);
+            var alternateFile = Assert.IsType<FileStreamResult>(controller.Get(alternateId)); await alternateFile.FileStream.DisposeAsync();
+            alternate.Setup(v => v.IsVisibleStandalone(owner)).Returns(false);
+            Assert.IsType<NotFoundObjectResult>(controller.Get(alternateId));
+            clips.Remove(alternateId, owner.Id);
+            request.MediaSourceId = source.Id;
+            sources.Setup(m => m.GetStaticMediaSources(item.Object, false, owner)).Returns(new[] { source });
+            request.PreviewFormat = "invalid";
+            Assert.IsType<BadRequestObjectResult>(await controller.Create(request, CancellationToken.None));
+            request.PreviewFormat = "mp4";
             // Exercise the new endpoint contract through the controller and real encoder.
             foreach (var selection in new[] { new ClipRange(Second / 2, 3 * Second / 2), new ClipRange(4 * Second, 5 * Second) })
             {
-                var selectedRequest = new ClipRequest { ItemId = item.Object.Id, MediaSourceId = source.Id, AnchorTicks = 3 * Second, StartTicks = selection.StartTicks, EndTicks = selection.EndTicks };
+                var selectedRequest = new ClipRequest { ItemId = item.Object.Id, MediaSourceId = source.Id, AnchorTicks = 3 * Second, StartTicks = selection.StartTicks, EndTicks = selection.EndTicks, PreviewFormat = "webm" };
                 var selectedResult = Assert.IsType<OkObjectResult>(await controller.Create(selectedRequest, CancellationToken.None));
                 var selectedId = JsonSerializer.SerializeToElement(selectedResult.Value).GetProperty("Id").GetGuid();
                 var selectedClip = Assert.IsType<StoredClip>(clips.Find(selectedId, owner.Id));
                 Assert.Equal(selection, selectedClip.Range);
+                Assert.EndsWith(".mp4", selectedClip.Filename);
+                Assert.Equal("video/mp4", selectedClip.ContentType);
                 Assert.True(new FileInfo(selectedClip.Path).Length > 0);
                 clips.Remove(selectedId, owner.Id);
             }
+            // Screenshots apply the same access policy before and after rendering.
+            var screenshotController = new ScreenshotController(library.Object, users.Object, sources.Object, encoder.Object, Mock.Of<ISubtitleEncoder>(), NullLogger<ScreenshotController>.Instance)
+            { ControllerContext = controller.ControllerContext };
+            var screenshot = Assert.IsType<FileContentResult>(await screenshotController.CaptureScreenshot(item.Object.Id, 2 * Second, source.Id, null, CancellationToken.None));
+            Assert.Equal("image/jpeg", screenshot.ContentType);
+            Assert.True(screenshot.FileContents.Length > 0);
+            Assert.Equal("private, no-store", screenshotController.Response.Headers.CacheControl.ToString());
+            encoder.SetupGet(e => e.EncoderPath).Returns(() => { item.Setup(v => v.IsVisibleStandalone(owner)).Returns(false); return ffmpeg; });
+            Assert.IsType<NotFoundObjectResult>(await screenshotController.CaptureScreenshot(item.Object.Id, 2 * Second, source.Id, null, CancellationToken.None));
+            // Previously generated clips are also denied when library visibility changes.
+            Assert.IsType<NotFoundObjectResult>(controller.Get(id));
+            item.Setup(v => v.IsVisibleStandalone(owner)).Returns(true);
+            encoder.SetupGet(e => e.EncoderPath).Returns(ffmpeg);
+
+            // A second user's valid identity cannot stream or remove another user's clip.
+            var otherUser = new User("other", "auth", "reset");
+            users.Setup(u => u.GetUserById(otherUser.Id)).Returns(otherUser);
+            controller.HttpContext.User = new ClaimsPrincipal(new ClaimsIdentity(new[] { new Claim("Jellyfin-UserId", otherUser.Id.ToString()) }, "test"));
+            Assert.IsType<NotFoundObjectResult>(controller.Get(id));
+            Assert.IsType<NoContentResult>(controller.Delete(id));
+            Assert.True(File.Exists(stored.Path));
+            controller.HttpContext.User = new ClaimsPrincipal(new ClaimsIdentity(new[] { new Claim("Jellyfin-UserId", owner.Id.ToString()) }, "test"));
+
             item.Setup(v => v.IsAuthorizedToDownload(owner)).Returns(false);
             Assert.IsType<NotFoundObjectResult>(controller.Get(id));
             Assert.IsType<NotFoundObjectResult>(await controller.Create(request, CancellationToken.None));

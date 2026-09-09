@@ -1,4 +1,3 @@
-using MediaBrowser.Model.Library;
 using Jellyfin.Plugin.Screenshot.Model;
 using Jellyfin.Plugin.Screenshot.Services;
 using MediaBrowser.Controller.Entities;
@@ -31,7 +30,7 @@ public sealed class ClipController : ControllerBase
         _logger = logger;
     }
 
-    private Guid UserId => Guid.TryParse(User.Claims.FirstOrDefault(c => c.Type.Equals("Jellyfin-UserId", StringComparison.OrdinalIgnoreCase))?.Value, out var id) ? id : Guid.Empty;
+    private Guid UserId => MediaCaptureAccess.UserId(User);
 
     private Video? AccessibleVideo(Guid itemId)
     {
@@ -39,9 +38,7 @@ public sealed class ClipController : ControllerBase
         if (userId == Guid.Empty || itemId == Guid.Empty) return null;
         var user = _users.GetUserById(userId);
         var item = _library.GetItemById<Video>(itemId);
-        return user is not null && item is not null
-            && item.GetPlayAccess(user) == PlayAccess.Full
-            && item.IsVisibleStandalone(user) && item.IsAuthorizedToDownload(user) ? item : null;
+        return MediaCaptureAccess.Allowed(item, user) ? item : null;
     }
 
     /// <summary>Renders a preview or a selected MP4 clip.</summary>
@@ -55,12 +52,19 @@ public sealed class ClipController : ControllerBase
             ? sources.FirstOrDefault(s => s.Path == item.Path)
             : sources.FirstOrDefault(s => string.Equals(s.Id, request.MediaSourceId, StringComparison.OrdinalIgnoreCase));
         if (source is null) return BadRequest("The selected media source is unavailable.");
+        var sourceItem = MediaCaptureAccess.SourceVideo(_library, item, source, _users.GetUserById(UserId)!);
+        if (sourceItem is null) return NotFound("This video is unavailable or you do not have download permission.");
         if (source.IsInfiniteStream || string.IsNullOrEmpty(source.Path) || !System.IO.File.Exists(source.Path))
             return BadRequest("Clipping requires a local video file with a known duration.");
         try
         {
             var range = ClipRange.FromRequest(request, source.RunTimeTicks ?? item.RunTimeTicks ?? 0);
-            var clip = await _clips.CreateAsync(UserId, item, source, request, range, cancellationToken).ConfigureAwait(false);
+            var clip = await _clips.CreateAsync(UserId, item, source, request, range, cancellationToken, sourceItem.Id).ConfigureAwait(false);
+            if (AccessibleVideo(item.Id) is null || AccessibleVideo(sourceItem.Id) is null)
+            {
+                _clips.Remove(clip.Id, UserId);
+                return NotFound("This video is unavailable or you do not have download permission.");
+            }
             Response.Headers.CacheControl = "no-store";
             return Ok(new { clip.Id, clip.Filename, range.StartTicks, range.EndTicks, clip.Expires });
         }
@@ -84,12 +88,12 @@ public sealed class ClipController : ControllerBase
     public ActionResult Get(Guid id, [FromQuery] bool download = false)
     {
         var clip = _clips.Find(id, UserId);
-        if (clip is null || AccessibleVideo(clip.ItemId) is null) return NotFound("The clip has expired or is unavailable.");
+        if (clip is null || AccessibleVideo(clip.ItemId) is null || AccessibleVideo(clip.SourceItemId) is null) return NotFound("The clip has expired or is unavailable.");
         try
         {
             var stream = new FileStream(clip.Path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
             Response.Headers.CacheControl = "private, no-store";
-            return new FileStreamResult(stream, "video/mp4")
+            return new FileStreamResult(stream, clip.ContentType)
             {
                 EnableRangeProcessing = true,
                 FileDownloadName = download ? clip.Filename : null
