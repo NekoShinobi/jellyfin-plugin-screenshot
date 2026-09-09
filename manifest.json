@@ -9,6 +9,22 @@
     "imageUrl": "",
     "versions": [
       {
+        "changelog": "Fixing several visual bugs, small QoL with scrubbing, and a security issue with screenshots.",
+        "targetAbi": "12.0.0.0",
+        "version": "3.2.8.15",
+        "sourceUrl": "https://github.com/NekoShinobi/jellyfin-plugin-screenshot/releases/download/2.2.8.15/Jellyfin.Plugin.Screenshot_3.2.8.15.zip",
+        "checksum": "E996C093ECBCA6C56DBDCA4857F16020",
+        "timestamp": "2026-09-09T06:22:03Z"
+      },
+      {
+        "changelog": "Fixing several visual bugs, small QoL with scrubbing, and a security issue with screenshots.",
+        "targetAbi": "10.11.0.0",
+        "version": "2.2.8.15",
+        "sourceUrl": "https://github.com/NekoShinobi/jellyfin-plugin-screenshot/releases/download/2.2.8.15/Jellyfin.Plugin.Screenshot_2.2.8.15.zip",
+        "checksum": "30B35984DADDF423B6F038D114AB3326",
+        "timestamp": "2026-09-09T06:22:03Z"
+      },
+      {
         "changelog": "Some minor speed improvements and better visibility into screenshot tool",
         "targetAbi": "12.0.0.0",
         "version": "3.2.3.14",
