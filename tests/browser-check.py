@@ -15,6 +15,8 @@ output.mkdir(parents=True, exist_ok=True)
 requests = []
 unauthorized = []
 authenticated = []
+render_gate = threading.Event(); render_gate.set()
+media_gate = threading.Event(); media_gate.set()
 settings = {'anchor':70,'runtime':200,'fail':False,'delay':False}
 item = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 
@@ -49,6 +51,8 @@ class Handler(BaseHTTPRequestHandler):
             <script>location.hash='/video';window.fixtureAnchor={settings['anchor']};window.ApiClient={{serverAddress:()=>location.origin+'/jellyfin',accessToken:()=>'fixture-token',deviceId:()=>'fixture-device'}};
             window.require=(modules,callback)=>callback({{getCurrentPlayer:()=>({{}}),currentItem:()=>({{Id:'{item}'}}),getCurrentTicks:()=>window.fixtureAnchor*10000000}});</script>
             <script src="/jellyfin/Screenshot/script"></script></body></html>""", 'text/html')
+        elif path == '/jellyfin/Screenshot/capture':
+            if self.authorize(media=True): self.send(b'fixture-jpeg', 'image/jpeg')
         elif path == '/jellyfin/Screenshot/script': self.send((assets/'screenshot.js').read_text()+'\n;\n'+(assets/'clipping.js').read_text(), 'application/javascript')
         elif path == '/jellyfin/Screenshot/clipping.css': self.send((assets/'clipping.css').read_bytes(), 'text/css')
         elif path == '/jellyfin/Sessions':
@@ -57,6 +61,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send(json.dumps([{'DeviceId':'fixture-device','NowPlayingItem':{'Id':item,'Name':'Aspect ratio test','RunTimeTicks':settings['runtime']*10000000},'PlayState':{'PositionTicks':settings['anchor']*10000000,'MediaSourceId':'selected-version','AudioStreamIndex':1,'SubtitleStreamIndex':2}}]))
         elif path.startswith('/jellyfin/Screenshot/clips/'):
             if not self.authorize(media=True): return
+            media_gate.wait(30)
             # Range requests exercise the video element just like FileStreamResult.
             start,end=0,len(video)-1
             if self.headers.get('Range'):
@@ -73,11 +78,13 @@ class Handler(BaseHTTPRequestHandler):
         body=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
         requests.append(body)
         if not self.authorize(): return
+        render_gate.wait(30)
         if settings['fail']:
             self.send('Rendering failed for test.','text/plain',500);return
         if settings['delay']:
             import time;time.sleep(1)
-        anchor=body['AnchorTicks'];start=max(0,anchor-body['BeforeTicks']);end=min(settings['runtime']*10000000,anchor+body['AfterTicks'])
+        anchor=body['AnchorTicks'];start=body['StartTicks'];end=body['EndTicks']
+        assert max(0,anchor-600000000) <= start < end <= min(settings['runtime']*10000000,anchor+600000000)
         self.send(json.dumps({'Id':str(uuid.uuid4()),'Filename':'test-clip.mp4','StartTicks':start,'EndTicks':end}))
     def do_DELETE(self):
         if self.authorize(): self.send('',code=204)
@@ -90,6 +97,42 @@ with sync_playwright() as p:
     page=browser.new_page(viewport={'width':1440,'height':1050},accept_downloads=True)
     errors=[];page.on('pageerror',lambda err:errors.append(str(err)))
     page.goto(url)
+    # Desktop completion supplies the actual renamed path; starting a download
+    # is not proof that a file was saved. Results are correlated per capture.
+    page.evaluate('window.jmpNative={startDownloadWithResult:(url,requestId)=>{window.pendingScreenshot={url,requestId}}}')
+    def request_screenshot():
+        page.evaluate('window.pendingScreenshot=null')
+        page.locator('#screenshot-capture-btn').click()
+        page.locator('[data-capture-mode="without-subtitles"]').click()
+        page.wait_for_function('window.pendingScreenshot')
+        assert 'saved to' not in page.locator('#screenshot-capture-toast').inner_text()
+    def report_screenshot(status, path=''):
+        page.evaluate("([status,fullPath])=>window.dispatchEvent(new CustomEvent('jellyfin-download-result',{detail:{...window.pendingScreenshot,status,fullPath}}))", [status,path])
+    request_screenshot()
+    page.evaluate("window.dispatchEvent(new CustomEvent('jellyfin-download-result',{detail:{requestId:'unrelated',status:'complete',fullPath:'/wrong.jpg'}}))")
+    assert '/wrong.jpg' not in page.locator('#screenshot-capture-toast').inner_text()
+    saved_path = 'C:/Users/Example/Pictures/映画 & \"renamed\" <frame>.jpg'
+    report_screenshot('complete', saved_path)
+    page.wait_for_function('document.querySelector("#screenshot-capture-toast")?.textContent.startsWith("Screenshot saved to:")')
+    assert page.locator('#screenshot-capture-toast').inner_text() == 'Screenshot saved to:\n'+saved_path
+    assert page.locator('#screenshot-capture-toast frame').count()==0
+    report_screenshot('cancelled') # Duplicate notifications cannot overwrite success.
+    assert saved_path in page.locator('#screenshot-capture-toast').inner_text()
+    for outcome, message in [('cancelled','save cancelled'),('failed','could not be saved')]:
+        request_screenshot();report_screenshot(outcome)
+        page.wait_for_function('(message)=>document.querySelector("#screenshot-capture-toast")?.textContent.includes(message)',arg=message)
+    # Older Desktop versions retain downloads without inventing a destination.
+    page.evaluate('window.jmpNative={startDownload:url=>window.legacyScreenshot=url}')
+    page.locator('#screenshot-capture-btn').click();page.locator('[data-capture-mode="without-subtitles"]').click()
+    page.wait_for_function('document.querySelector("#screenshot-capture-toast")?.textContent.includes("does not report the saved path")')
+    assert page.evaluate('window.legacyScreenshot').startswith(f'http://127.0.0.1:{server.server_port}/jellyfin/Screenshot/capture?')
+    # Standard browsers cannot expose the local download path or completion.
+    page.evaluate('delete window.jmpNative')
+    page.locator('#screenshot-capture-btn').click()
+    with page.expect_download() as screenshot_download:page.locator('[data-capture-mode="without-subtitles"]').click()
+    assert screenshot_download.value.suggested_filename.endswith('.jpg')
+    page.wait_for_function('document.querySelector("#screenshot-capture-toast")?.textContent.includes("browser’s downloads")')
+    assert 'saved to:' not in page.locator('#screenshot-capture-toast').inner_text()
     page.locator('#screenshot-clip-btn').click()
     page.wait_for_function('document.querySelector(".jfc-export")?.disabled===false')
     assert requests[-1]['Preview'] and requests[-1]['AnchorTicks']==700000000
@@ -99,24 +142,68 @@ with sync_playwright() as p:
     page.wait_for_function('document.querySelectorAll(".jfc-frames img").length===8')
     page.screenshot(path=str(output/'focus-desktop.png'),full_page=True)
     page.locator('[data-jfc-preset="60,60"]').click()
-    assert page.locator('#jfc-before').input_value()=='60'
-    assert page.locator('#jfc-after').input_value()=='60'
-    page.locator('#jfc-before').fill('999');assert page.locator('#jfc-before').input_value()=='60'
-    page.locator('#jfc-before').fill('0');page.locator('#jfc-after').fill('0');assert page.locator('.jfc-export').is_disabled()
+    assert page.locator('#jfc-start').input_value()=='10'
+    assert page.locator('#jfc-duration').input_value()=='120'
+    page.locator('#jfc-start').fill('999');assert page.locator('#jfc-start').input_value()=='130'
+    page.locator('#jfc-duration').fill('0');assert page.locator('.jfc-export').is_disabled()
     page.locator('[data-jfc-preset="15,15"]').click()
-    page.locator('.jfc-start').focus();page.keyboard.press('ArrowLeft');assert page.locator('#jfc-before').input_value()=='16'
+    page.locator('.jfc-start').focus();page.keyboard.press('ArrowLeft');assert page.locator('#jfc-start').input_value()=='54'
     track=page.locator('.jfc-timeline').bounding_box();handle=page.locator('.jfc-start').bounding_box()
     page.mouse.move(handle['x']+7,handle['y']+20);page.mouse.down();page.mouse.move(track['x'],track['y']+20,steps=8);page.mouse.up()
-    assert page.locator('#jfc-before').input_value()=='60'
+    assert page.locator('#jfc-start').input_value()=='10'
     page.locator('[data-jfc-preset="15,15"]').click();page.locator('.jfc-play').click()
     page.wait_for_timeout(1100);assert page.locator('[data-clip-preview]').evaluate('el=>el.currentTime')>45
-    page.locator('.jfc-play').click()
+    # The desktop's idle CSS must not hide the editor cursor, and time updates
+    # must not replace the pause hit target midway through a real mouse click.
+    page.add_style_tag(content='body.mouseIdle, body.mouseIdle * { cursor:none!important; }')
+    page.evaluate('''() => {
+        document.body.classList.add('mouseIdle');
+        window.pauseIcon=document.querySelector('.jfc-play .jfc-icon');
+        window.hostClicks=0;
+        document.addEventListener('click', () => window.hostClicks++);
+    }''')
+    assert page.locator('.jfc-preview').evaluate('el=>getComputedStyle(el).cursor') != 'none'
+    assert page.locator('.jfc-play').evaluate('el=>getComputedStyle(el).opacity') == '1'
+    button=page.locator('.jfc-play').bounding_box()
+    page.mouse.move(button['x']+button['width']/2,button['y']+button['height']/2)
+    page.mouse.down();page.wait_for_timeout(700)
+    assert page.evaluate('window.pauseIcon===document.querySelector(".jfc-play .jfc-icon")')
+    page.mouse.up()
+    page.wait_for_function('document.querySelector("[data-clip-preview]").paused')
+    assert page.evaluate('window.hostClicks') == 0
+    # Pause remains reliable over repeated play/pause cycles.
+    for _ in range(3):
+        page.locator('.jfc-play').click()
+        page.wait_for_function('!document.querySelector("[data-clip-preview]").paused')
+        page.locator('.jfc-play').click()
+        page.wait_for_function('document.querySelector("[data-clip-preview]").paused')
     page.locator('#jfc-subtitles').check();page.wait_for_function('document.querySelector(".jfc-export")?.disabled===false')
     assert requests[-1]['SubtitleStreamIndex']==2
     with page.expect_download() as download:page.locator('.jfc-export').click()
     assert download.value.suggested_filename=='test-clip.mp4'
-    assert not requests[-1]['Preview'] and requests[-1]['BeforeTicks']==150000000 and requests[-1]['AfterTicks']==150000000
+    assert not requests[-1]['Preview'] and requests[-1]['StartTicks']==550000000 and requests[-1]['EndTicks']==850000000
     assert requests[-1]['AnchorTicks']==700000000
+    # Move the end handle before the moment, and export a selection wholly before it.
+    page.locator('.jfc-end').focus();page.keyboard.press('Home')
+    for _ in range(10): page.keyboard.press('ArrowRight')
+    assert page.locator('#jfc-start').input_value() == '55'
+    assert page.locator('#jfc-duration').input_value() == '10'
+    with page.expect_download(): page.locator('.jfc-export').click()
+    assert requests[-1]['StartTicks']==550000000 and requests[-1]['EndTicks']==650000000
+    assert requests[-1]['AnchorTicks']==700000000
+    # Starting point moves the same duration to the other side of the moment.
+    page.locator('#jfc-start').fill('100')
+    assert page.locator('#jfc-duration').input_value() == '10'
+    with page.expect_download(): page.locator('.jfc-export').click()
+    assert requests[-1]['StartTicks']==1000000000 and requests[-1]['EndTicks']==1100000000
+    assert requests[-1]['AnchorTicks']==700000000
+    # Both handles can cross the marker, but cannot cross each other or the window.
+    page.locator('[data-jfc-preset="60,60"]').click()
+    page.locator('.jfc-start').focus()
+    for _ in range(13): page.keyboard.press('Shift+ArrowRight')
+    assert page.locator('#jfc-start').input_value() == '75'
+    page.keyboard.press('End');assert page.locator('#jfc-duration').input_value() == '0'
+    page.locator('[data-jfc-preset="15,15"]').click()
     page.locator('.jfc-close').click();assert page.locator('#jfclip-editor').count()==0
     assert page.locator('#screenshot-clip-btn').evaluate('el=>el===document.activeElement')
     # Native download receives only a prepared URL, preserving the CEF navigation state.
@@ -131,14 +218,40 @@ with sync_playwright() as p:
     assert page.locator('.jfc-export').is_disabled()
     settings['fail']=False;page.locator('.jfc-retry').click();page.wait_for_function('document.querySelector(".jfc-export")?.disabled===false');page.keyboard.press('Escape')
     settings['delay']=True;page.locator('#screenshot-clip-btn').click();page.locator('#jfclip-editor').wait_for();page.keyboard.press('Escape');page.wait_for_timeout(1200);assert page.locator('#jfclip-editor').count()==0;settings['delay']=False
+    # A silent media request must stop the spinner and offer a retry.
+    page.clock.install()
+    media_gate.clear()
+    page.locator('#screenshot-clip-btn').click()
+    page.wait_for_function('document.querySelector(".jfc-loading-label")?.textContent === "Loading preview video…"')
+    page.clock.fast_forward(31_000)
+    page.locator('.jfc-retry').wait_for(state='visible')
+    assert 'was created' in page.locator('.jfc-status').inner_text()
+    assert page.locator('.jfc-export').is_disabled()
+    media_gate.set()
+    page.locator('.jfc-retry').click()
+    page.wait_for_function('document.querySelector(".jfc-export")?.disabled===false')
+    page.keyboard.press('Escape')
+    # A render with no response gets a bounded wait and can be retried.
+    render_gate.clear()
+    page.locator('#screenshot-clip-btn').click()
+    page.locator('#jfclip-editor').wait_for()
+    page.clock.fast_forward(20_000)
+    assert 'server is still rendering' in page.locator('.jfc-status').inner_text()
+    page.clock.fast_forward(610_000)
+    page.locator('.jfc-retry').wait_for(state='visible')
+    assert 'did not finish' in page.locator('.jfc-status').inner_text()
+    render_gate.set()
+    page.locator('.jfc-retry').click()
+    page.wait_for_function('document.querySelector(".jfc-export")?.disabled===false')
+    page.keyboard.press('Escape')
     # Beginning/end of media and a narrow viewport.
     for anchor,runtime in [(5,10),(198,200)]:
         settings.update(anchor=anchor,runtime=runtime)
         page.set_viewport_size({'width':390,'height':844});page.goto(url)
         page.locator('#screenshot-clip-btn').click();page.wait_for_function('document.querySelector(".jfc-export")?.disabled===false')
         page.locator('[data-jfc-preset="60,60"]').click()
-        assert float(page.locator('#jfc-before').input_value())==min(60,anchor)
-        assert float(page.locator('#jfc-after').input_value())==min(60,runtime-anchor)
+        assert float(page.locator('#jfc-start').input_value())==max(0,anchor-60)
+        assert float(page.locator('#jfc-duration').input_value())==min(60,anchor)+min(60,runtime-anchor)
         box=page.locator('.jfc-preview').bounding_box();assert abs(box['width']/box['height']-16/9)<.01
         assert page.evaluate('document.documentElement.scrollWidth<=innerWidth')
         page.screenshot(path=str(output/f'focus-mobile-{anchor}.png'),full_page=True)
@@ -146,7 +259,7 @@ with sync_playwright() as p:
     assert not errors,errors
     assert not unauthorized,unauthorized
     assert any(method == 'DELETE' for method, _ in authenticated)
-    (output/'browser-checks.json').write_text(json.dumps({'status':'passed','requests':len(requests),'errors':errors,'checks':['modern authorization with legacy auth disabled','button injection','real preview playback and seeking','real thumbnails','16:9 contain','bounds and zero length','drag and keyboard trimming','fixed anchor','selected source/audio/subtitles','browser download','native download','retry','close during prepare','media boundaries','mobile overflow']},indent=2))
+    (output/'browser-checks.json').write_text(json.dumps({'status':'passed','requests':len(requests),'errors':errors,'checks':['confirmed screenshot path, cancellation, failure and browser fallback','visible idle cursor and reliable pause','selections before and after the fixed moment','stalled render and media timeout with retry','modern authorization with legacy auth disabled','button injection','real preview playback and seeking','real thumbnails','16:9 contain','bounds and zero length','drag and keyboard trimming','fixed anchor','selected source/audio/subtitles','browser download','native download','retry','close during prepare','media boundaries','mobile overflow']},indent=2))
     browser.close()
 server.shutdown()
 print('PASS: production editor, real video playback/thumbnails, trimming, downloads, cancellation, retries, and mobile boundaries')

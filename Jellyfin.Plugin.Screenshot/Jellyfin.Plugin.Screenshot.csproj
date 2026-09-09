@@ -42,7 +42,7 @@
     <PluginCategory>General</PluginCategory>
     <PluginOverview>Capture screenshots and create short video clips from the player.</PluginOverview>
     <PluginDescription>Provides a native screenshot capture button in the Jellyfin video player. When clicked, the server extracts the exact frame from the source file using FFmpeg and returns it as a JPEG download.</PluginDescription>
-    <PluginChangelog>Fix session lookup, clip creation, preview, and downloads when legacy authorization is disabled.</PluginChangelog>
+    <PluginChangelog>Speed up clip previews with early resizing, a 24 fps cap, and faster encoding while preserving export settings.</PluginChangelog>
     <PluginOwner>NekoShinobi</PluginOwner>
   </PropertyGroup>
 

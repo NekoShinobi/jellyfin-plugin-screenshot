@@ -49,6 +49,40 @@ public sealed class ClipTests
     public void InvalidRangeIsRejected(long anchor, long before, long after, long runtime)
         => Assert.Throws<ArgumentException>(() => ClipRange.Create(anchor * Second, before * Second, after * Second, runtime * Second));
 
+    [Theory]
+    [InlineData(70, 10, 40, 200)] // Entirely before the requested moment.
+    [InlineData(70, 90, 130, 200)] // Entirely after the requested moment.
+    [InlineData(70, 10, 130, 200)]
+    [InlineData(5, 0, 3, 10)]
+    [InlineData(198, 199, 200, 200)]
+    public void EndpointsCanMoveAnywhereWithinFrozenWindow(long anchor, long start, long end, long runtime)
+    {
+        var result = ClipRange.FromRequest(new ClipRequest { AnchorTicks = anchor * Second, StartTicks = start * Second, EndTicks = end * Second }, runtime * Second);
+        Assert.Equal(start * Second, result.StartTicks);
+        Assert.Equal(end * Second, result.EndTicks);
+    }
+
+    [Theory]
+    [InlineData(70, 9, 40, 200)]
+    [InlineData(70, 90, 131, 200)]
+    [InlineData(70, 50, 50, 200)]
+    [InlineData(70, 60, 50, 200)]
+    [InlineData(5, -1, 3, 10)]
+    [InlineData(198, 199, 201, 200)]
+    [InlineData(201, 199, 200, 200)]
+    public void EndpointsCannotEscapeFrozenWindow(long anchor, long start, long end, long runtime)
+        => Assert.Throws<ArgumentException>(() => ClipRange.FromRequest(new ClipRequest { AnchorTicks = anchor * Second, StartTicks = start * Second, EndTicks = end * Second }, runtime * Second));
+
+    [Fact]
+    public void EndpointsMustBePairedAndCannotOverflow()
+    {
+        Assert.Throws<ArgumentException>(() => ClipRange.FromRequest(new ClipRequest { AnchorTicks = Second, StartTicks = 0 }, 10 * Second));
+        Assert.Throws<ArgumentException>(() => ClipRange.FromRequest(new ClipRequest { AnchorTicks = Second, EndTicks = Second }, 10 * Second));
+        Assert.Throws<ArgumentException>(() => ClipRange.FromRequest(new ClipRequest { AnchorTicks = 1, StartTicks = long.MinValue, EndTicks = long.MaxValue }, long.MaxValue));
+        var result = ClipRange.FromRequest(new ClipRequest { AnchorTicks = long.MaxValue - 2, StartTicks = long.MaxValue - 1, EndTicks = long.MaxValue }, long.MaxValue);
+        Assert.Equal(1, result.DurationTicks);
+    }
+
     [Fact]
     public void TickArithmeticCannotOverflow()
     {
@@ -82,6 +116,35 @@ public sealed class ClipTests
         Directory.Delete(root, true);
     }
 
+    [FfmpegFact]
+    public async Task FastPreviewToneMapsHdrAndPreservesLowFrameRates()
+    {
+        var ffmpeg = Environment.GetEnvironmentVariable("SCREENSHOT_FFMPEG")!;
+        var ffprobe = Environment.GetEnvironmentVariable("SCREENSHOT_FFPROBE")!;
+        var root = Path.Combine(Path.GetTempPath(), "clip-preview-" + Guid.NewGuid());
+        Directory.CreateDirectory(root);
+        try
+        {
+            foreach (var rate in new[] { 12, 30 })
+            {
+                var source = Path.Combine(root, $"hdr-{rate}.mkv");
+                var preview = Path.Combine(root, $"preview-{rate}.mp4");
+                await Run(ffmpeg, "-hide_banner", "-loglevel", "error", "-filter_threads", "2", "-f", "lavfi", "-i", $"testsrc2=size=1280x720:rate={rate}:duration=3", "-c:v", "libx264", "-preset", "ultrafast", "-threads", "2", "-vf", "format=yuv420p10le,setparams=color_primaries=bt2020:color_trc=smpte2084:colorspace=bt2020nc", "-y", source);
+                await ClipEncoder.RunAsync(ClipEncoder.Build(ffmpeg, source, preview, new ClipRange(Second / 2, 5 * Second / 2), 0, null, true, null, null, true), CancellationToken.None);
+                var probe = JsonDocument.Parse(await Run(ffprobe, "-v", "error", "-show_streams", "-show_format", "-of", "json", preview));
+                var video = probe.RootElement.GetProperty("streams")[0];
+                Assert.Equal(960, video.GetProperty("width").GetInt32());
+                Assert.Equal(540, video.GetProperty("height").GetInt32());
+                Assert.Equal("16:9", video.GetProperty("display_aspect_ratio").GetString());
+                Assert.Equal($"{Math.Min(rate, 24)}/1", video.GetProperty("avg_frame_rate").GetString());
+                Assert.Equal("bt709", video.GetProperty("color_transfer").GetString());
+                Assert.Equal("bt709", video.GetProperty("color_primaries").GetString());
+                Assert.InRange(double.Parse(probe.RootElement.GetProperty("format").GetProperty("duration").GetString()!, System.Globalization.CultureInfo.InvariantCulture), 1.9, 2.1);
+            }
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
     // Set SCREENSHOT_FFMPEG and SCREENSHOT_FFPROBE for real encoder integration tests.
     [FfmpegFact]
     public async Task RealClipHasAccurateDurationOriginalAspectAndAudio()
@@ -103,9 +166,19 @@ public sealed class ClipTests
             Assert.Equal(320, video.GetProperty("width").GetInt32());
             Assert.Equal(240, video.GetProperty("height").GetInt32());
             Assert.Equal("4:3", video.GetProperty("display_aspect_ratio").GetString());
+            Assert.Equal("25/1", video.GetProperty("avg_frame_rate").GetString());
             Assert.Contains(streams, s => s.GetProperty("codec_type").GetString() == "audio");
             var duration = double.Parse(probe.RootElement.GetProperty("format").GetProperty("duration").GetString()!, System.Globalization.CultureInfo.InvariantCulture);
             Assert.InRange(duration, 3.35, 3.5);
+            var quickPreview = Path.Combine(root, "quick-preview.mp4");
+            await ClipEncoder.RunAsync(ClipEncoder.Build(ffmpeg, input, quickPreview, new ClipRange(23 * Second / 10, 57 * Second / 10), 0, 1, true, null, null, false), CancellationToken.None);
+            var quickProbe = JsonDocument.Parse(await Run(ffprobe, "-v", "error", "-show_streams", "-show_format", "-of", "json", quickPreview));
+            var quickVideo = quickProbe.RootElement.GetProperty("streams").EnumerateArray().Single(s => s.GetProperty("codec_type").GetString() == "video");
+            Assert.Equal("24/1", quickVideo.GetProperty("avg_frame_rate").GetString());
+            Assert.Equal("4:3", quickVideo.GetProperty("display_aspect_ratio").GetString());
+            Assert.Equal("yuv420p", quickVideo.GetProperty("pix_fmt").GetString());
+            Assert.Contains(quickProbe.RootElement.GetProperty("streams").EnumerateArray(), s => s.GetProperty("codec_type").GetString() == "audio");
+            Assert.InRange(double.Parse(quickProbe.RootElement.GetProperty("format").GetProperty("duration").GetString()!, System.Globalization.CultureInfo.InvariantCulture), 3.3, 3.5);
             // Anamorphic source retains its display ratio in the smaller preview.
             var anamorphic = Path.Combine(root, "anamorphic.mkv");
             await Run(ffmpeg, "-hide_banner", "-loglevel", "error", "-i", input, "-vf", "setsar=2", "-c:v", "libx264", "-threads", "2", "-an", "-y", anamorphic);
@@ -124,6 +197,11 @@ public sealed class ClipTests
             var averages = System.Text.RegularExpressions.Regex.Matches(stats, @"lavfi.signalstats.YAVG=([0-9.]+)").Select(m => double.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
             Assert.True(averages[0] > 16.1, $"Subtitle should appear immediately; luma={averages[0]}, max={averages.Max()}.");
             Assert.InRange(averages[^1], 15.9, 16.1);
+            await ClipEncoder.RunAsync(ClipEncoder.Build(ffmpeg, black, captioned, new ClipRange(23 * Second / 10, 43 * Second / 10), 0, null, true, subtitle, null, false), CancellationToken.None);
+            var previewStats = await Run(ffmpeg, "-hide_banner", "-loglevel", "error", "-i", captioned, "-vf", "signalstats,metadata=mode=print:key=lavfi.signalstats.YAVG:file=-", "-f", "null", "-");
+            var previewLuma = System.Text.RegularExpressions.Regex.Matches(previewStats, @"lavfi.signalstats.YAVG=([0-9.]+)").Select(m => double.Parse(m.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
+            Assert.True(previewLuma[0] > 16.1);
+            Assert.InRange(previewLuma[^1], 15.9, 16.1);
 
             // Exercise actual service ownership, streaming, cleanup and revoked access.
             var paths = new Mock<IApplicationPaths>(); paths.SetupGet(p => p.CachePath).Returns(root);
@@ -151,6 +229,17 @@ public sealed class ClipTests
             Assert.True(File.Exists(stored.Path));
             var file = Assert.IsType<FileStreamResult>(controller.Get(id));
             Assert.True(file.EnableRangeProcessing); await file.FileStream.DisposeAsync();
+            // Exercise the new endpoint contract through the controller and real encoder.
+            foreach (var selection in new[] { new ClipRange(Second / 2, 3 * Second / 2), new ClipRange(4 * Second, 5 * Second) })
+            {
+                var selectedRequest = new ClipRequest { ItemId = item.Object.Id, MediaSourceId = source.Id, AnchorTicks = 3 * Second, StartTicks = selection.StartTicks, EndTicks = selection.EndTicks };
+                var selectedResult = Assert.IsType<OkObjectResult>(await controller.Create(selectedRequest, CancellationToken.None));
+                var selectedId = JsonSerializer.SerializeToElement(selectedResult.Value).GetProperty("Id").GetGuid();
+                var selectedClip = Assert.IsType<StoredClip>(clips.Find(selectedId, owner.Id));
+                Assert.Equal(selection, selectedClip.Range);
+                Assert.True(new FileInfo(selectedClip.Path).Length > 0);
+                clips.Remove(selectedId, owner.Id);
+            }
             item.Setup(v => v.IsAuthorizedToDownload(owner)).Returns(false);
             Assert.IsType<NotFoundObjectResult>(controller.Get(id));
             Assert.IsType<NotFoundObjectResult>(await controller.Create(request, CancellationToken.None));

@@ -38,6 +38,13 @@ internal static class ClipEncoder
         if (bitmapSubtitle is not null) Add("-i", bitmapSubtitle);
 
         var filters = new List<string>();
+        if (preview)
+        {
+            // Drop excess frames and shrink before expensive HDR/subtitle processing.
+            // Unknown input frame rates fall back to 24; low-frame-rate sources stay low.
+            filters.Add("fps=fps='if(gt(source_fps,0),min(source_fps,24),24)'");
+            filters.Add("scale=w='min(960,iw)':h='min(540,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2");
+        }
         if (hdr)
         {
             // Produce a browser-compatible SDR MP4 from PQ/HLG sources.
@@ -47,9 +54,7 @@ internal static class ClipEncoder
         // Preserve source timestamps for subtitle rendering, then rebase both A/V streams
         // by the same offset so audio delay remains intact.
         filters.Add($"setpts=PTS-{Seconds(range.StartTicks)}/TB");
-        filters.Add(preview
-            ? "scale=w='min(960,iw)':h='min(540,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2"
-            : "scale=trunc(iw/2)*2:trunc(ih/2)*2");
+        if (!preview) filters.Add("scale=trunc(iw/2)*2:trunc(ih/2)*2");
         var video = $"0:{videoIndex}";
         if (bitmapSubtitle is not null)
         {
@@ -62,7 +67,8 @@ internal static class ClipEncoder
                 "-c:a", "aac", "-b:a", "192k", "-ac", "2");
         }
         else Add("-an");
-        Add("-t", Seconds(range.DurationTicks), "-c:v", "libx264", "-threads", "2", "-preset", "veryfast",
+        if (preview) Add("-g", "24");
+        Add("-t", Seconds(range.DurationTicks), "-c:v", "libx264", "-threads", "2", "-preset", preview ? "ultrafast" : "veryfast",
             "-crf", preview ? "27" : "20", "-maxrate", preview ? "2M" : "20M", "-bufsize", preview ? "4M" : "40M",
             "-pix_fmt", "yuv420p", "-sn", "-map_metadata", "-1", "-map_chapters", "-1", "-movflags", "+faststart", "-y", output);
         return info;

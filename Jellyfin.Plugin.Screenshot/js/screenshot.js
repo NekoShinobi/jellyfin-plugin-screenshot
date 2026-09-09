@@ -61,6 +61,14 @@
      * Injects the screenshot button before the native settings button in the OSD.
      */
     function addButton() {
+        // The screenshot menu uses the capture theme even before the clip editor opens.
+        if (!document.getElementById('jfclip-styles') && typeof ApiClient !== 'undefined') {
+            const styles = document.createElement('link');
+            styles.id = 'jfclip-styles';
+            styles.rel = 'stylesheet';
+            styles.href = `${ApiClient.serverAddress().replace(/\/$/, '')}/Screenshot/clipping.css`;
+            document.head.append(styles);
+        }
         addClipButton();
         if (document.getElementById(BTN_ID)) return;
 
@@ -74,6 +82,10 @@
 
         const btn = document.createElement('button');
         btn.id = BTN_ID;
+        btn.type = 'button';
+        btn.setAttribute('aria-label', 'Take screenshot');
+        btn.setAttribute('aria-haspopup', 'dialog');
+        btn.setAttribute('aria-expanded', 'false');
         btn.setAttribute('is', 'paper-icon-button-light');
         btn.className = 'autoSize paper-icon-button-light';
         btn.title = 'Screenshot';
@@ -156,7 +168,7 @@
     }
 
     /**
-     * Opens a Jellyfin-style action sheet and resolves with the selected capture mode.
+     * Opens the themed screenshot menu and resolves with the selected capture mode.
      */
     function showCaptureOptions() {
         closeCaptureOptions();
@@ -164,39 +176,33 @@
         return new Promise(resolve => {
             const previouslyFocused = document.activeElement;
             const backdrop = document.createElement('div');
-            backdrop.className = 'dialogBackdrop dialogBackdropOpened';
+            backdrop.className = 'jfs-backdrop';
             backdrop.dataset.screenshotCaptureBackdrop = 'true';
 
             const container = document.createElement('div');
             container.id = DIALOG_ID;
-            container.className = 'dialogContainer';
+            container.className = 'jfs-container';
             container.innerHTML = `
-                <div class="focuscontainer dialog actionsheet-not-fullscreen actionSheet centeredDialog opened"
-                     role="dialog" aria-modal="true" aria-labelledby="screenshot-capture-title">
-                    <div class="actionSheetContent">
-                        <h1 id="screenshot-capture-title" class="actionSheetTitle">Take screenshot</h1>
-                        <div class="actionSheetScroller scrollY">
-                            <button is="emby-button" type="button"
-                                    class="listItem listItem-button actionSheetMenuItem emby-button"
-                                    data-capture-mode="with-subtitles">
-                                <span class="actionsheetMenuItemIcon listItemIcon listItemIcon-transparent material-icons closed_caption"
-                                      aria-hidden="true"></span>
-                                <div class="listItemBody actionsheetListItemBody">
-                                    <div class="listItemBodyText actionSheetItemText">With subtitles</div>
-                                </div>
-                            </button>
-                            <button is="emby-button" type="button"
-                                    class="listItem listItem-button actionSheetMenuItem emby-button"
-                                    data-capture-mode="without-subtitles">
-                                <span class="actionsheetMenuItemIcon listItemIcon listItemIcon-transparent material-icons photo_camera"
-                                      aria-hidden="true"></span>
-                                <div class="listItemBody actionsheetListItemBody">
-                                    <div class="listItemBodyText actionSheetItemText">Without subtitles</div>
-                                </div>
-                            </button>
-                        </div>
+                <div class="jfs-panel" role="dialog" aria-modal="true" aria-labelledby="screenshot-capture-title">
+                    <header class="jfs-header">
+                        <div><div class="jfs-eyebrow">SCREENSHOT</div><h1 id="screenshot-capture-title">Take screenshot</h1></div>
+                        <button type="button" class="jfs-close" data-capture-close aria-label="Close screenshot menu"><span class="material-icons" aria-hidden="true">close</span></button>
+                    </header>
+                    <div class="jfs-options">
+                        <button type="button" class="jfs-option" data-capture-mode="with-subtitles">
+                            <span class="jfs-option-icon material-icons" aria-hidden="true">closed_caption</span>
+                            <span class="jfs-option-copy"><span class="jfs-option-title">With subtitles</span><span class="jfs-option-description">Include the selected subtitle track.</span></span>
+                            <span class="jfs-option-arrow material-icons" aria-hidden="true">arrow_forward</span>
+                        </button>
+                        <button type="button" class="jfs-option" data-capture-mode="without-subtitles">
+                            <span class="jfs-option-icon material-icons" aria-hidden="true">photo_camera</span>
+                            <span class="jfs-option-copy"><span class="jfs-option-title">Without subtitles</span><span class="jfs-option-description">Capture the video image only.</span></span>
+                            <span class="jfs-option-arrow material-icons" aria-hidden="true">arrow_forward</span>
+                        </button>
                     </div>
+                    <footer class="jfs-footer"><span class="jfs-format">JPEG</span><button type="button" class="jfs-cancel" data-capture-close>Cancel</button></footer>
                 </div>`;
+            document.getElementById(BTN_ID)?.setAttribute('aria-expanded', 'true');
 
             let settled = false;
             const finish = choice => {
@@ -206,19 +212,30 @@
                 container.remove();
                 backdrop.remove();
                 closeCaptureDialog = null;
+                document.getElementById(BTN_ID)?.setAttribute('aria-expanded', 'false');
                 previouslyFocused?.focus?.();
                 resolve(choice);
             };
             const onKeyDown = event => {
                 if (event.key === 'Escape') {
                     event.preventDefault();
+                    event.stopPropagation();
                     finish(null);
+                } else if (event.key === 'Tab') {
+                    const buttons = Array.from(container.querySelectorAll('button'));
+                    const index = buttons.indexOf(document.activeElement);
+                    if (event.shiftKey && index <= 0) {
+                        event.preventDefault(); buttons[buttons.length - 1].focus();
+                    } else if (!event.shiftKey && (index < 0 || index === buttons.length - 1)) {
+                        event.preventDefault(); buttons[0].focus();
+                    }
                 }
             };
             closeCaptureDialog = () => finish(null);
 
             container.addEventListener('click', event => {
-                if (event.target === container) {
+                event.stopPropagation();
+                if (event.target === container || event.target.closest('[data-capture-close]')) {
                     finish(null);
                     return;
                 }
@@ -231,7 +248,7 @@
             backdrop.addEventListener('click', () => finish(null));
             document.addEventListener('keydown', onKeyDown);
 
-            document.body.append(backdrop, container);
+            (document.fullscreenElement || document.body).append(backdrop, container);
             requestAnimationFrame(() => {
                 container.querySelector('[data-capture-mode]')?.focus();
             });
@@ -392,7 +409,7 @@
         return `${name}${episodeCode}-${padNumber(hours)}-${padNumber(minutes)}-${padNumber(seconds)}.jpg`;
     }
 
-    function showFallbackToast(message) {
+    function showFallbackToast(message, duration = 5_000) {
         document.getElementById('screenshot-capture-toast')?.remove();
 
         const toast = document.createElement('div');
@@ -414,10 +431,12 @@
             'color:#fff',
             'box-shadow:0 .15em .6em rgba(0,0,0,.35)',
             'font-size:1rem',
-            'text-align:center'
+            'text-align:center',
+            'overflow-wrap:anywhere',
+            'white-space:pre-wrap'
         ].join(';');
         document.body.appendChild(toast);
-        setTimeout(() => toast.remove(), 5_000);
+        setTimeout(() => toast.remove(), duration);
     }
 
     async function showToast(message) {
@@ -438,6 +457,36 @@
         }
 
         showFallbackToast(message);
+    }
+
+    function downloadWithResult(url) {
+        return new Promise((resolve, reject) => {
+            const requestId = Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('');
+            // Distinguish simultaneous captures of the same frame in the native handler.
+            const downloadUrl = new URL(url);
+            downloadUrl.searchParams.set('CaptureRequestId', requestId);
+            const finish = result => {
+                clearTimeout(timer);
+                window.removeEventListener('jellyfin-download-result', onResult);
+                window.removeEventListener('pagehide', onPageHide);
+                resolve(result);
+            };
+            const onResult = event => {
+                const result = event.detail;
+                if (result?.requestId === requestId && ['complete', 'cancelled', 'failed'].includes(result.status)) finish(result);
+            };
+            const onPageHide = () => finish({ status: 'dismissed' });
+            const timer = setTimeout(() => finish({ status: 'unknown' }), 15 * 60_000);
+            window.addEventListener('jellyfin-download-result', onResult);
+            window.addEventListener('pagehide', onPageHide, { once: true });
+            try { window.jmpNative.startDownloadWithResult(downloadUrl.href, requestId); }
+            catch (error) {
+                clearTimeout(timer);
+                window.removeEventListener('jellyfin-download-result', onResult);
+                window.removeEventListener('pagehide', onPageHide);
+                reject(error);
+            }
+        });
     }
 
     /**
@@ -493,10 +542,27 @@
         console.log(LOG_PREFIX, 'Download URL (key redacted):', url.replace(apiKey, '[REDACTED]'));
 
         try {
-            if (window.jmpNative && window.jmpNative.startDownload) {
+            if (typeof window.jmpNative?.startDownloadWithResult === 'function') {
+                await showToast(`Preparing screenshot: ${filename}`);
+                const result = await downloadWithResult(url);
+                if (result.status === 'complete') {
+                    if (typeof result.fullPath === 'string' && result.fullPath.length > 0) {
+                        // Keep long paths readable, including spaces, backslashes and Unicode.
+                        showFallbackToast(`Screenshot saved to:\n${result.fullPath}`, 10_000);
+                    } else {
+                        showToast('Screenshot saved. This client did not report the saved location.');
+                    }
+                } else if (result.status === 'cancelled') {
+                    showToast('Screenshot save cancelled.');
+                } else if (result.status === 'failed') {
+                    showToast('Screenshot could not be saved. Check the destination and try again.');
+                } else if (result.status === 'unknown') {
+                    showToast('Screenshot save status is unavailable. Check your downloads.');
+                }
+            } else if (window.jmpNative && window.jmpNative.startDownload) {
                 // CEF desktop client — use native download API, no frame involved
                 window.jmpNative.startDownload(url);
-                showToast(`Saving screenshot as ${filename}`);
+                showToast(`Screenshot download started: ${filename}. This Desktop version does not report the saved path.`);
                 console.log(LOG_PREFIX, '✓ startDownload called (CEF path)');
             } else {
                 showToast(`Creating screenshot as ${filename}`);
@@ -517,7 +583,7 @@
                 link.remove();
                 setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
 
-                showToast(`Saving screenshot as ${filename}`);
+                showToast(`Screenshot download started: ${filename}. Check your browser’s downloads for the saved location.`);
                 console.log(LOG_PREFIX, '✓ screenshot response downloaded (browser path)');
             }
         } catch (err) {

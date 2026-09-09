@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Jellyfin.Plugin.Screenshot.Model;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Controller.Entities;
@@ -56,6 +57,8 @@ public sealed class ClipService : IDisposable
         var retained = false;
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token, _shutdown.Token);
         timeout.CancelAfter(TimeSpan.FromMinutes(10));
+        var elapsed = Stopwatch.StartNew();
+        _logger.LogInformation("Preparing {ClipKind} {ClipId} for item {ItemId}, duration {DurationSeconds}s", request.Preview ? "preview" : "clip", id, item.Id, range.DurationTicks / (double)TimeSpan.TicksPerSecond);
         try
         {
             var video = source.VideoStream ?? throw new ArgumentException("No video stream is available.");
@@ -85,6 +88,7 @@ public sealed class ClipService : IDisposable
                 || string.Equals(video.ColorTransfer, "arib-std-b67", StringComparison.OrdinalIgnoreCase);
             var info = ClipEncoder.Build(_encoder.EncoderPath, source.Path, output, range,
                 ClipEncoder.InputIndex(source, video), audio is null ? null : ClipEncoder.InputIndex(source, audio), request.Preview, textSubtitle, bitmapSubtitle, hdr);
+            _logger.LogInformation("Starting FFmpeg for clip {ClipId}: {Width}x{Height}, HDR={Hdr}, subtitles={Subtitles}", id, video.Width, video.Height, hdr, request.SubtitleStreamIndex.HasValue);
             await ClipEncoder.RunAsync(info, timeout.Token).ConfigureAwait(false);
             if (!File.Exists(output) || new FileInfo(output).Length == 0) throw new InvalidOperationException("FFmpeg produced no clip.");
             timeout.Token.ThrowIfCancellationRequested();
@@ -99,10 +103,12 @@ public sealed class ClipService : IDisposable
                 _clips.Add(id, clip);
             }
             retained = true;
+            _logger.LogInformation("Clip {ClipId} ready after {ElapsedSeconds:F1}s, {Bytes} bytes", id, elapsed.Elapsed.TotalSeconds, new FileInfo(output).Length);
             return clip;
         }
         finally
         {
+            if (!retained) _logger.LogInformation("Clip {ClipId} preparation ended without output after {ElapsedSeconds:F1}s", id, elapsed.Elapsed.TotalSeconds);
             DeleteFile(assFile);
             if (!retained) DeleteFile(output);
             lock (_gate) _active.Remove(userId);

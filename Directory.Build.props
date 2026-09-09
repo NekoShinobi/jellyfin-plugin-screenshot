@@ -1,9 +1,9 @@
 <Project>
     <PropertyGroup>
         <JellyfinVersion Condition="'$(JellyfinVersion)' == ''">10.11.0</JellyfinVersion>
-        <Version>2.1.1.0</Version>
+        <Version>2.2.3.0</Version>
         <!-- Keep the Jellyfin 12 series higher so server upgrades receive its build. -->
-        <Version Condition="'$(JellyfinVersion)' == '12.0.0'">3.1.1.0</Version>
+        <Version Condition="'$(JellyfinVersion)' == '12.0.0'">3.2.3.0</Version>
         <AssemblyVersion>$(Version)</AssemblyVersion>
         <FileVersion>$(Version)</FileVersion>
         <BaseIntermediateOutputPath>obj/$(JellyfinVersion)/</BaseIntermediateOutputPath>

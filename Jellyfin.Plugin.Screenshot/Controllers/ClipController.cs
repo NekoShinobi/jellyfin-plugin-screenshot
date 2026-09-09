@@ -59,7 +59,7 @@ public sealed class ClipController : ControllerBase
             return BadRequest("Clipping requires a local video file with a known duration.");
         try
         {
-            var range = ClipRange.Create(request.AnchorTicks, request.BeforeTicks, request.AfterTicks, source.RunTimeTicks ?? item.RunTimeTicks ?? 0);
+            var range = ClipRange.FromRequest(request, source.RunTimeTicks ?? item.RunTimeTicks ?? 0);
             var clip = await _clips.CreateAsync(UserId, item, source, request, range, cancellationToken).ConfigureAwait(false);
             Response.Headers.CacheControl = "no-store";
             return Ok(new { clip.Id, clip.Filename, range.StartTicks, range.EndTicks, clip.Expires });

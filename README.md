@@ -5,13 +5,22 @@ Adds a camera button to the Jellyfin video player OSD. On click, choose whether 
 ## Video clipping
 
 The scissors button beside Screenshot opens the **Focus** editor and pauses playback.
-The request timestamp stays fixed while editing. Choose up to 60 seconds before and
-60 seconds after it (120 seconds total), with the window clamped to the media's start
-and end. Drag the timeline handles, enter times, use presets, or trim with arrow keys
+The request timestamp fixes a window from 60 seconds before to 60 seconds after
+it (120 seconds total), clamped to the media's start
+and end. Choose a **Starting point** (seconds into the video) and **Duration**, or
+drag either handle anywhere within that window. “Your moment” is a reference marker;
+a selection may sit entirely before or after it. Moving the starting point preserves
+the duration until it reaches the window's end. Drag the timeline handles, enter times, use presets, or trim with arrow keys
 (Shift changes by five seconds; Home/End move to the available limits).
 
-The server prepares a small H.264/AAC preview of the surrounding window. It supports
-real playback, seeking, and a thumbnail filmstrip. The **16:9 preview box** fits the
+The server prepares an H.264/AAC preview of the surrounding window at up to
+960×540 and 24 fps, retaining lower source frame rates. Preview frames are resized
+before HDR tone mapping and text subtitle rendering, then encoded with the fastest
+software preset. Frequent keyframes help seeking and thumbnail extraction. Preview
+compression is less efficient, so files can be larger within the existing bitrate
+limit; export quality and frame rate are unchanged. The complete window still needs
+to render before playback, so preparation time depends on server CPU and source
+decoding speed. It supports real playback, seeking, and a thumbnail filmstrip. The **16:9 preview box** fits the
 entire image with black bars as needed. These bars are **never added to the export**.
 MP4 exports retain the source display aspect ratio, use the selected audio track,
 and optionally burn in the selected text or bitmap subtitle track. H.264 requires
@@ -81,8 +90,8 @@ dotnet build -c Release -p:JellyfinVersion=12.0.0
 
 The packaged DLL and `meta.json` are written to:
 
-- `Jellyfin.Plugin.Screenshot/bin/Release/net9.0/Screenshot Capture_2.1.1.0/`
-- `Jellyfin.Plugin.Screenshot/bin/Release/net10.0/Screenshot Capture_3.1.1.0/`
+- `Jellyfin.Plugin.Screenshot/bin/Release/net9.0/Screenshot Capture_2.2.3.0/`
+- `Jellyfin.Plugin.Screenshot/bin/Release/net10.0/Screenshot Capture_3.2.3.0/`
 
 Intermediate files are isolated by server version, so switching between builds does
 not require cleaning. `build.yaml` describes the default 10.11 package;
@@ -128,3 +137,19 @@ This fixture does not replace testing against a deployed Jellyfin server.
 ### Authentication compatibility
 
 Session lookup and clip creation/cleanup use the signed-in client’s token in the standard `Authorization: MediaBrowser` header. Preview video and native downloads use Jellyfin’s supported `ApiKey` query parameter. Both Jellyfin 10.11 and 12 work with legacy authorization disabled; no server authentication setting needs to change.
+
+### Preview troubleshooting
+
+The editor shows elapsed time while the server renders the preview, then switches to “Loading preview video” once the MP4 is ready. A media load that stalls for 30 seconds offers a retry. Render requests have a client deadline of 610 seconds, allowing the server’s 10-minute limit to return its error; closing the editor cancels preparation. Temporary-file cleanup requests are limited to 5 seconds.
+
+If preparation stalls, check whether `POST /Screenshot/clips` is still pending or whether the subsequent `GET /Screenshot/clips/<id>` fails. Jellyfin server logs now record the clip ID, render start, completion time, and output size. Remove API keys before sharing request details.
+
+Preview controls stay visible during playback, including when the underlying player hides its idle cursor. Editor clicks and keys stay within the modal, and the play/pause button retains its hit target during time updates. Absolute `StartTicks`/`EndTicks` are validated against the frozen `AnchorTicks` window; earlier clients using `BeforeTicks`/`AfterTicks` remain supported.
+
+### Screenshot save notifications
+
+With the updated Jellyfin Desktop download bridge, the toast shows **Screenshot saved to:** followed by the actual full path after the download completes. This includes folder or filename changes in the save dialog. Cancellation and failed downloads have separate messages. Long paths wrap and remain visible for ten seconds.
+
+Standard browsers do not expose the local download destination or completion to page scripts. Their toast shows the requested filename and directs you to the browser's download history. Older Desktop clients that only expose `startDownload` also keep working, but cannot report the full path. Installing the plugin alone does not add the required Desktop capability.
+
+The accompanying Desktop change exposes `jmpNative.startDownloadWithResult(url, requestId)` and emits `jellyfin-download-result` with `requestId`, `status` (`complete`, `cancelled`, or `failed`), and `fullPath` on completion. The plugin ignores unrelated/duplicate events. Desktop limits pending requests and delivers results only to the initiating page.

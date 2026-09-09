@@ -3,6 +3,8 @@
     'use strict';
     if (window.JellyfinClip) return;
     const TICKS = 10_000_000;
+    const RENDER_TIMEOUT = 610_000; // Allow the server's ten-minute render timeout to respond.
+    const MEDIA_TIMEOUT = 30_000;
     let current = null;
     let generation = 0;
     let opening = false;
@@ -25,44 +27,61 @@
 
     async function release(state, id) {
         if (!id) return;
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 5_000);
         try {
             await fetch(`${state.context.server}/Screenshot/clips/${encodeURIComponent(id)}`, {
-                method: 'DELETE', headers: state.context.authorizationHeaders, keepalive: true
+                method: 'DELETE', headers: state.context.authorizationHeaders, keepalive: true, signal: controller.signal
             });
         } catch (_) { /* Expiry cleanup handles disconnected clients. */ }
+        finally { clearTimeout(timer); }
     }
 
     async function create(state, preview) {
         const context = state.context;
         const controller = new AbortController();
         state.request = controller;
-        const response = await fetch(`${context.server}/Screenshot/clips`, {
-            method: 'POST', signal: controller.signal,
-            headers: { 'Content-Type': 'application/json', ...context.authorizationHeaders },
-            body: JSON.stringify({
-                ItemId: context.itemId, MediaSourceId: context.mediaSourceId,
-                AnchorTicks: context.anchorTicks,
-                BeforeTicks: Math.round((preview ? state.maxBefore : state.before) * TICKS),
-                AfterTicks: Math.round((preview ? state.maxAfter : state.after) * TICKS),
-                AudioStreamIndex: context.audioStreamIndex,
-                SubtitleStreamIndex: state.$('#jfc-subtitles').checked ? context.subtitleStreamIndex : null,
-                Preview: preview
-            })
-        });
-        if (!response.ok) {
-            const body = await response.text();
-            let message = body;
-            try { const data = JSON.parse(body); message = typeof data === 'string' ? data : data.detail || data.title; } catch (_) { }
-            throw new Error(message || `Clip request failed (${response.status}).`);
+        let timedOut = false;
+        const timer = setTimeout(() => { timedOut = true; controller.abort(); }, RENDER_TIMEOUT);
+        try {
+            const response = await fetch(`${context.server}/Screenshot/clips`, {
+                method: 'POST', signal: controller.signal,
+                headers: { 'Content-Type': 'application/json', ...context.authorizationHeaders },
+                body: JSON.stringify({
+                    ItemId: context.itemId, MediaSourceId: context.mediaSourceId,
+                    AnchorTicks: context.anchorTicks,
+                    StartTicks: Math.round((preview ? state.windowStart : state.start) * TICKS),
+                    EndTicks: Math.round((preview ? state.windowEnd : state.end) * TICKS),
+                    AudioStreamIndex: context.audioStreamIndex,
+                    SubtitleStreamIndex: state.$('#jfc-subtitles').checked ? context.subtitleStreamIndex : null,
+                    Preview: preview
+                })
+            });
+            if (!response.ok) {
+                const body = await response.text();
+                let message = body;
+                try { const data = JSON.parse(body); message = typeof data === 'string' ? data : data.detail || data.title; } catch (_) { }
+                throw new Error(message || `Clip request failed (${response.status}).`);
+            }
+            const data = await response.json();
+            const result = {
+                id: value(data, 'Id'), filename: value(data, 'Filename'),
+                start: value(data, 'StartTicks') / TICKS, end: value(data, 'EndTicks') / TICKS
+            };
+            if (current !== state) { release(state, result.id); throw new DOMException('Closed', 'AbortError'); }
+            return result;
+        } catch (error) {
+            if (timedOut) throw new Error('The server did not finish preparing the clip in time. Retry, or check the Jellyfin server log.');
+            throw error;
+        } finally {
+            clearTimeout(timer);
+            if (state.request === controller) state.request = null;
         }
-        const data = await response.json();
-        const result = {
-            id: value(data, 'Id'), filename: value(data, 'Filename'),
-            start: value(data, 'StartTicks') / TICKS, end: value(data, 'EndTicks') / TICKS
-        };
-        if (current !== state) { release(state, result.id); throw new DOMException('Closed', 'AbortError'); }
-        state.request = null;
-        return result;
+    }
+
+    function clearPreparationTimers(state) {
+        clearInterval(state.preparationTimer);
+        clearTimeout(state.mediaTimer);
     }
 
     function status(state, message, error = false) {
@@ -71,36 +90,38 @@
     }
 
     function update(state, seek = false) {
-        const { $, anchor, maxBefore, maxAfter } = state;
-        const width = maxBefore + maxAfter;
-        const start = maxBefore - state.before;
-        const end = maxBefore + state.after;
+        const { $, anchor, windowStart, windowEnd } = state;
+        const width = windowEnd - windowStart;
+        const start = state.start - windowStart;
+        const end = state.end - windowStart;
+        const duration = state.end - state.start;
         const percent = seconds => `${width ? seconds / width * 100 : 0}%`;
-        $('#jfc-before').value = Number(state.before.toFixed(3));
-        $('#jfc-after').value = Number(state.after.toFixed(3));
-        $('#jfc-before').max = maxBefore;
-        $('#jfc-after').max = maxAfter;
-        $('.jfc-start-time').textContent = `Starts at ${time(anchor - state.before)}`;
-        $('.jfc-end-time').textContent = `Ends at ${time(anchor + state.after)}`;
-        $('.jfc-duration').textContent = `${short(state.before + state.after)} selected`;
-        $('.jfc-export-label').textContent = state.exporting ? 'Creating clip…' : `Create ${short(state.before + state.after)} clip`;
-        $('.jfc-export').disabled = !state.ready || state.busy || state.before + state.after <= 0;
-        $('.jfc-play').disabled = !state.ready || state.busy || state.before + state.after <= 0;
+        $('#jfc-start').value = Number(state.start.toFixed(3));
+        $('#jfc-duration').value = Number(duration.toFixed(3));
+        $('#jfc-start').min = windowStart;
+        $('#jfc-start').max = windowEnd;
+        $('#jfc-duration').max = windowEnd - state.start;
+        $('.jfc-start-time').textContent = `Starts at ${time(state.start)}`;
+        $('.jfc-end-time').textContent = `Ends at ${time(state.end)}`;
+        $('.jfc-duration').textContent = `${short(duration)} selected`;
+        $('.jfc-export-label').textContent = state.exporting ? 'Creating clip…' : `Create ${short(duration)} clip`;
+        $('.jfc-export').disabled = !state.ready || state.busy || duration <= 0;
+        $('.jfc-play').disabled = !state.ready || state.busy || duration <= 0;
         $('.jfc-controls').disabled = state.busy || !state.ready;
         $('#jfc-subtitles').disabled = state.busy || !(Number.isInteger(state.context.subtitleStreamIndex) && state.context.subtitleStreamIndex >= 0);
         $('.jfc-left').style.width = percent(start);
         $('.jfc-right').style.width = percent(width - end);
         $('.jfc-selection').style.left = percent(start);
         $('.jfc-selection').style.width = percent(end - start);
-        $('.jfc-anchor').style.left = percent(maxBefore);
-        $('.jfc-anchor-label').style.left = percent(maxBefore);
-        // Keep the anchor label in the box near the beginning/end of a file.
-        $('.jfc-anchor-label').style.transform = maxBefore / width < .15 ? 'none' : maxBefore / width > .85 ? 'translateX(-100%)' : 'translateX(-50%)';
-        $('.jfc-window-start').textContent = time(anchor - maxBefore);
-        $('.jfc-window-end').textContent = time(anchor + maxAfter);
+        $('.jfc-anchor').style.left = percent(anchor - windowStart);
+        $('.jfc-anchor-label').style.left = percent(anchor - windowStart);
+        const anchorFraction = (anchor - windowStart) / width;
+        $('.jfc-anchor-label').style.transform = anchorFraction < .15 ? 'none' : anchorFraction > .85 ? 'translateX(-100%)' : 'translateX(-50%)';
+        $('.jfc-window-start').textContent = time(windowStart);
+        $('.jfc-window-end').textContent = time(windowEnd);
         for (const [selector, position, minimum, maximum, absolute] of [
-            ['.jfc-start', start, 0, maxBefore, anchor - state.before],
-            ['.jfc-end', end, maxBefore, width, anchor + state.after]
+            ['.jfc-start', start, 0, end, state.start],
+            ['.jfc-end', end, start, width, state.end]
         ]) {
             const el = $(selector);
             el.style.left = percent(position);
@@ -111,32 +132,52 @@
         }
         state.dialog.querySelectorAll('[data-jfc-preset]').forEach(el => {
             const [before, after] = el.dataset.jfcPreset.split(',').map(Number);
-            el.setAttribute('aria-pressed', state.before === Math.min(before, maxBefore) && state.after === Math.min(after, maxAfter));
+            el.setAttribute('aria-pressed', state.start === Math.max(windowStart, anchor - before) && state.end === Math.min(windowEnd, anchor + after));
         });
         state.dialog.querySelectorAll('[data-jfc-adjust]').forEach(el => {
-            const [side, change] = el.dataset.jfcAdjust.split(':');
-            el.disabled = Number(change) < 0 ? state[side] <= 0 : state[side] >= (side === 'before' ? maxBefore : maxAfter);
+            const [field, change] = el.dataset.jfcAdjust.split(':');
+            const currentValue = field === 'start' ? state.start : duration;
+            const minimum = field === 'start' ? windowStart : 0;
+            const maximum = field === 'start' ? windowEnd : windowEnd - state.start;
+            el.disabled = Number(change) < 0 ? currentValue <= minimum : currentValue >= maximum;
         });
         if (seek && state.ready) {
             state.video.pause();
-            state.video.currentTime = Math.max(0, anchor - state.before - state.preview.start);
+            state.video.currentTime = Math.max(0, state.start - state.preview.start);
         }
         clock(state);
     }
 
     function clock(state) {
-        const absolute = state.preview ? state.preview.start + state.video.currentTime : state.anchor - state.before;
+        const absolute = state.preview ? state.preview.start + state.video.currentTime : state.start;
         state.$('.jfc-preview-time').textContent = time(absolute);
-        const width = state.maxBefore + state.maxAfter;
-        state.$('.jfc-playhead').style.left = `${Math.max(0, Math.min(100, (absolute - state.anchor + state.maxBefore) / width * 100))}%`;
-        state.$('.jfc-preview').classList.toggle('jfc-playing', !state.video.paused);
-        state.$('.jfc-play').innerHTML = icon(state.video.paused ? 'play_arrow' : 'pause');
-        state.$('.jfc-play').setAttribute('aria-label', state.video.paused ? 'Preview selected clip' : 'Pause clip preview');
+        const width = state.windowEnd - state.windowStart;
+        state.$('.jfc-playhead').style.left = `${Math.max(0, Math.min(100, (absolute - state.windowStart) / width * 100))}%`;
+        const paused = state.video.paused;
+        // Keep the hit target intact between pointerdown and click, even during timeupdate.
+        const glyph = state.$('.jfc-play .jfc-icon');
+        const name = paused ? 'play_arrow' : 'pause';
+        if (glyph.textContent !== name) glyph.textContent = name;
+        state.$('.jfc-play').setAttribute('aria-label', paused ? 'Preview selected clip' : 'Pause clip preview');
     }
 
-    function setSelection(state, side, input) {
+    function setSelection(state, field, input) {
         const number = Number(input);
-        state[side] = Math.min(side === 'before' ? state.maxBefore : state.maxAfter, Math.max(0, Number.isFinite(number) ? number : 0));
+        if (!Number.isFinite(number)) return;
+        if (field === 'start') {
+            // Moving the starting point keeps the duration where the window allows it.
+            const duration = state.end - state.start;
+            state.start = Math.max(state.windowStart, Math.min(state.windowEnd, number));
+            state.end = Math.min(state.windowEnd, state.start + duration);
+        } else {
+            state.end = state.start + Math.max(0, Math.min(state.windowEnd - state.start, number));
+        }
+        update(state, true);
+    }
+
+    function setEndpoint(state, side, value) {
+        if (side === 'start') state.start = Math.max(state.windowStart, Math.min(state.end, value));
+        else state.end = Math.max(state.start, Math.min(state.windowEnd, value));
         update(state, true);
     }
 
@@ -182,6 +223,7 @@
 
     async function prepare(state) {
         state.request?.abort();
+        clearPreparationTimers(state);
         state.video.pause();
         state.ready = false; state.busy = true;
         state.video.removeAttribute('src'); state.video.load();
@@ -191,17 +233,31 @@
         state.$('.jfc-spinner').hidden = false;
         state.$('.jfc-loading-label').textContent = 'Preparing your preview…';
         state.$('.jfc-retry').hidden = true;
-        status(state, 'The first preview may take a little longer while the video and subtitles are prepared.');
+        const started = Date.now();
+        state.preparationTimer = setInterval(() => {
+            if (current !== state) return;
+            const seconds = Math.floor((Date.now() - started) / 1000);
+            state.$('.jfc-loading-label').textContent = `Preparing your preview… ${seconds}s`;
+            if (seconds >= 15) status(state, 'The server is still rendering the preview. High-resolution video and subtitles can take longer. You can cancel at any time.');
+        }, 1000);
+        status(state, 'The server is rendering the available video around your moment.');
         update(state);
         if (previous) await release(state, previous.id);
         if (current !== state) return;
         try {
             const preview = await create(state, true);
             state.preview = preview;
-            state.maxBefore = Math.max(0, state.anchor - preview.start);
-            state.maxAfter = Math.max(0, preview.end - state.anchor);
-            state.before = Math.min(state.before, state.maxBefore);
-            state.after = Math.min(state.after, state.maxAfter);
+            if (Math.abs(preview.start - state.windowStart) > .001 || Math.abs(preview.end - state.windowEnd) > .001) {
+                throw new Error('The preview does not match the requested clipping window. Reload the client and try again.');
+            }
+            clearInterval(state.preparationTimer);
+            state.$('.jfc-loading-label').textContent = 'Loading preview video…';
+            status(state, 'The server finished preparing the preview. Loading it in this client…');
+            state.mediaTimer = setTimeout(() => {
+                if (current !== state || state.preview !== preview || state.ready) return;
+                failedPreview(state, 'The preview was created, but this client could not load it within 30 seconds. Retry the preview or try Jellyfin in a web browser.');
+                state.video.removeAttribute('src'); state.video.load();
+            }, MEDIA_TIMEOUT);
             state.video.src = clipUrl(state, preview.id);
             state.video.load();
         } catch (error) {
@@ -211,6 +267,7 @@
     }
 
     function failedPreview(state, message) {
+        clearPreparationTimers(state);
         state.busy = false; state.ready = false;
         state.$('.jfc-loading').hidden = false;
         state.$('.jfc-spinner').hidden = true;
@@ -221,7 +278,7 @@
     }
 
     async function exportClip(state) {
-        if (state.busy || !state.ready || state.before + state.after <= 0) return;
+        if (state.busy || !state.ready || state.end <= state.start) return;
         state.video.pause(); state.busy = true; state.exporting = true;
         status(state, 'Creating your clip… You can cancel by closing the editor.');
         update(state);
@@ -252,6 +309,7 @@
         const state = current;
         current = null;
         if (!state) return;
+        clearPreparationTimers(state);
         state.request?.abort();
         state.video.pause(); state.video.removeAttribute('src'); state.video.load();
         if (state.thumbnailVideo) { state.thumbnailVideo.removeAttribute('src'); state.thumbnailVideo.load(); }
@@ -282,22 +340,23 @@
                     <button class="jfc-play" aria-label="Preview selected clip" disabled>${icon('play_arrow')}</button>
                     <button class="jfc-mute" aria-label="Mute clip preview">${icon('volume_up')}</button><span class="jfc-preview-time"></span>
                     <div class="jfc-loading"><span class="jfc-spinner" aria-hidden="true"></span><span class="jfc-loading-label">Preparing your preview…</span><button class="jfc-retry" hidden>Retry preview</button></div>
-                </div><div class="jfc-heading"><span>Choose up to 1 minute before and after <strong class="jfc-moment"></strong>.</span><span class="jfc-duration"></span></div>
+                </div><div class="jfc-heading"><span>Trim anywhere in this window. Requested at <strong class="jfc-moment"></strong>.</span><span class="jfc-duration"></span></div>
                 <fieldset class="jfc-controls" disabled aria-label="Clip selection"><div class="jfc-timeline-section">
                     <div class="jfc-scale"><span class="jfc-window-start"></span><span class="jfc-window-end"></span><span class="jfc-anchor-label">Your moment</span></div>
                     <div class="jfc-timeline"><div class="jfc-frames" aria-hidden="true"></div><div class="jfc-left"></div><div class="jfc-right"></div><div class="jfc-selection"></div><div class="jfc-anchor"></div><div class="jfc-playhead"></div>
                         <button class="jfc-handle jfc-start" role="slider" aria-label="Clip start"></button><button class="jfc-handle jfc-end" role="slider" aria-label="Clip end"></button></div>
                     <p class="jfc-hint">Drag the handles to trim. Click the filmstrip to scrub.</p></div>
                     <div class="jfc-fields">
-                        <div class="jfc-field"><label for="jfc-before">Before this moment</label><div class="jfc-input-row"><button data-jfc-adjust="before:-5" aria-label="Remove 5 seconds before">−</button><input id="jfc-before" type="number" min="0" max="60" step="0.1"><span class="jfc-unit">sec</span><button data-jfc-adjust="before:5" aria-label="Add 5 seconds before">+</button></div><span class="jfc-boundary jfc-start-time"></span></div>
-                        <div class="jfc-field"><label for="jfc-after">After this moment</label><div class="jfc-input-row"><button data-jfc-adjust="after:-5" aria-label="Remove 5 seconds after">−</button><input id="jfc-after" type="number" min="0" max="60" step="0.1"><span class="jfc-unit">sec</span><button data-jfc-adjust="after:5" aria-label="Add 5 seconds after">+</button></div><span class="jfc-boundary jfc-end-time"></span></div>
-                    </div><div class="jfc-presets"><button data-jfc-preset="30,0">Last 30s</button><button data-jfc-preset="15,15">±15s</button><button data-jfc-preset="30,30">±30s</button><button data-jfc-preset="60,60">Full 2 min</button></div>
+                        <div class="jfc-field"><label for="jfc-start">Starting point</label><div class="jfc-input-row"><button data-jfc-adjust="start:-5" aria-label="Move start 5 seconds earlier">−</button><input id="jfc-start" type="number" min="0" max="60" step="0.1"><span class="jfc-unit">sec</span><button data-jfc-adjust="start:5" aria-label="Move start 5 seconds later">+</button></div><span class="jfc-boundary jfc-start-time"></span></div>
+                        <div class="jfc-field"><label for="jfc-duration">Duration</label><div class="jfc-input-row"><button data-jfc-adjust="duration:-5" aria-label="Shorten duration by 5 seconds">−</button><input id="jfc-duration" type="number" min="0" max="60" step="0.1"><span class="jfc-unit">sec</span><button data-jfc-adjust="duration:5" aria-label="Extend duration by 5 seconds">+</button></div><span class="jfc-boundary jfc-end-time"></span></div>
+                    </div><div class="jfc-presets"><button data-jfc-preset="30,0">Last 30s</button><button data-jfc-preset="15,15">±15s</button><button data-jfc-preset="30,30">±30s</button><button data-jfc-preset="60,60">Full window</button></div>
                 </fieldset></div>
                 <footer class="jfc-footer"><label class="jfc-subs"><input id="jfc-subtitles" type="checkbox">Include selected subtitles</label><div class="jfc-actions"><span class="jfc-format">MP4</span><button class="jfc-cancel">Cancel</button><button class="jfc-export" disabled>${icon('content_cut')}<span class="jfc-export-label"></span></button></div></footer><p class="jfc-status" role="status" aria-live="polite"></p>`;
             const maxBefore = Math.min(60, context.anchorTicks / TICKS);
             const maxAfter = Math.min(60, (context.runtimeTicks - context.anchorTicks) / TICKS);
-            const state = { dialog, context, anchor: context.anchorTicks / TICKS, maxBefore, maxAfter,
-                before: Math.min(30, maxBefore), after: Math.min(15, maxAfter), ready: false, busy: true,
+            const anchor = context.anchorTicks / TICKS;
+            const state = { dialog, context, anchor, windowStart: anchor - maxBefore, windowEnd: anchor + maxAfter,
+                start: anchor - Math.min(30, maxBefore), end: anchor + Math.min(15, maxAfter), ready: false, busy: true,
                 preview: null, download: null, request: null, focus: document.activeElement,
                 $: selector => dialog.querySelector(selector), video: dialog.querySelector('video') };
             current = state;
@@ -306,55 +365,61 @@
             state.$('.jfc-close').onclick = close; state.$('.jfc-cancel').onclick = close;
             dialog.addEventListener('cancel', event => { event.preventDefault(); close(); });
             dialog.addEventListener('click', event => { if (event.target === dialog) { const b = dialog.getBoundingClientRect(); if (event.clientX < b.left || event.clientX > b.right || event.clientY < b.top || event.clientY > b.bottom) close(); } });
+            // Keep editor input out of the underlying player's global controls.
+            for (const type of ['click', 'dblclick', 'mousedown', 'mouseup', 'pointerdown', 'pointerup', 'keydown', 'keyup']) {
+                dialog.addEventListener(type, event => event.stopPropagation());
+            }
             state.$('.jfc-retry').onclick = () => prepare(state);
             state.$('#jfc-subtitles').onchange = () => prepare(state);
             state.$('.jfc-export').onclick = () => exportClip(state);
             state.$('.jfc-play').onclick = async () => {
-                if (!state.ready) return;
+                if (!state.ready || state.busy) return;
                 if (!state.video.paused) state.video.pause();
                 else {
-                    const start = state.anchor - state.before - state.preview.start;
-                    const end = state.anchor + state.after - state.preview.start;
+                    const start = state.start - state.preview.start;
+                    const end = state.end - state.preview.start;
                     if (state.video.currentTime < start || state.video.currentTime >= end - .04) state.video.currentTime = Math.max(0, start);
-                    try { await state.video.play(); } catch (_) { status(state, 'The preview could not play. Try reloading it.', true); }
+                    try { await state.video.play(); } catch (error) { if (current === state && error.name !== 'AbortError') status(state, 'The preview could not play. Try reloading it.', true); }
                 }
             };
             state.$('.jfc-mute').onclick = () => { state.video.muted = !state.video.muted; state.$('.jfc-mute').innerHTML = icon(state.video.muted ? 'volume_off' : 'volume_up'); state.$('.jfc-mute').setAttribute('aria-label', state.video.muted ? 'Unmute clip preview' : 'Mute clip preview'); };
             state.video.addEventListener('loadedmetadata', () => {
                 if (current !== state || !state.preview) return;
+                clearPreparationTimers(state);
                 state.busy = false; state.ready = true; state.$('.jfc-loading').hidden = true;
                 status(state, ''); update(state, true); thumbnails(state, state.preview);
             });
             state.video.addEventListener('error', () => { if (current === state && state.preview) failedPreview(state, 'The preview could not load or has expired. Retry to prepare it again.'); });
             for (const event of ['play', 'pause', 'seeked', 'timeupdate']) state.video.addEventListener(event, () => {
-                if (state.preview && !state.video.paused && state.video.currentTime >= state.anchor + state.after - state.preview.start) state.video.pause();
+                if (state.preview && !state.video.paused && state.video.currentTime >= state.end - state.preview.start) state.video.pause();
                 clock(state);
             });
-            for (const side of ['before', 'after']) state.$(`#jfc-${side}`).oninput = event => setSelection(state, side, event.target.value);
-            dialog.querySelectorAll('[data-jfc-adjust]').forEach(el => el.onclick = () => { const [side, change] = el.dataset.jfcAdjust.split(':'); setSelection(state, side, state[side] + Number(change)); });
-            dialog.querySelectorAll('[data-jfc-preset]').forEach(el => el.onclick = () => { const [before, after] = el.dataset.jfcPreset.split(',').map(Number); state.before = Math.min(before, state.maxBefore); state.after = Math.min(after, state.maxAfter); update(state, true); });
-            for (const [selector, side] of [['.jfc-start', 'before'], ['.jfc-end', 'after']]) {
+            for (const side of ['start', 'duration']) state.$(`#jfc-${side}`).oninput = event => setSelection(state, side, event.target.value);
+            dialog.querySelectorAll('[data-jfc-adjust]').forEach(el => el.onclick = () => { const [side, change] = el.dataset.jfcAdjust.split(':'); setSelection(state, side, (side === 'duration' ? state.end - state.start : state.start) + Number(change)); });
+            dialog.querySelectorAll('[data-jfc-preset]').forEach(el => el.onclick = () => { const [before, after] = el.dataset.jfcPreset.split(',').map(Number); state.start = Math.max(state.windowStart, state.anchor - before); state.end = Math.min(state.windowEnd, state.anchor + after); update(state, true); });
+            for (const [selector, side] of [['.jfc-start', 'start'], ['.jfc-end', 'end']]) {
                 const handle = state.$(selector); let dragging = false;
-                const move = event => { const box = state.$('.jfc-timeline').getBoundingClientRect(); const position = (event.clientX - box.left) / box.width * (state.maxBefore + state.maxAfter); setSelection(state, side, side === 'before' ? state.maxBefore - position : position - state.maxBefore); };
-                handle.onpointerdown = event => { event.preventDefault(); event.stopPropagation(); handle.focus(); handle.setPointerCapture(event.pointerId); dragging = true; move(event); };
+                const move = event => { const box = state.$('.jfc-timeline').getBoundingClientRect(); const position = state.windowStart + (event.clientX - box.left) / box.width * (state.windowEnd - state.windowStart); setEndpoint(state, side, position); };
+                handle.onpointerdown = event => { if (!state.ready || state.busy || event.button !== 0) return; event.preventDefault(); event.stopPropagation(); handle.focus(); handle.setPointerCapture(event.pointerId); dragging = true; move(event); };
                 handle.onpointermove = event => { if (dragging) move(event); };
-                handle.onpointerup = handle.onpointercancel = () => { dragging = false; };
+                handle.onpointerup = handle.onpointercancel = event => { dragging = false; if (handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId); };
+                handle.onlostpointercapture = () => { dragging = false; };
                 handle.onkeydown = event => {
                     const step = event.shiftKey ? 5 : 1;
                     let target = state[side];
-                    if (event.key === 'ArrowLeft') target += side === 'before' ? step : -step;
-                    else if (event.key === 'ArrowRight') target += side === 'before' ? -step : step;
-                    else if (event.key === 'Home') target = side === 'before' ? state.maxBefore : 0;
-                    else if (event.key === 'End') target = side === 'before' ? 0 : state.maxAfter;
+                    if (event.key === 'ArrowLeft') target -= step;
+                    else if (event.key === 'ArrowRight') target += step;
+                    else if (event.key === 'Home') target = state.windowStart;
+                    else if (event.key === 'End') target = state.windowEnd;
                     else return;
-                    event.preventDefault(); setSelection(state, side, target);
+                    event.preventDefault(); setEndpoint(state, side, target);
                 };
             }
             state.$('.jfc-timeline').onpointerdown = event => {
                 if (!state.ready || state.busy || event.target.closest('.jfc-handle')) return;
                 const box = state.$('.jfc-timeline').getBoundingClientRect();
-                const absolute = state.anchor - state.maxBefore + (event.clientX - box.left) / box.width * (state.maxBefore + state.maxAfter);
-                state.video.pause(); state.video.currentTime = Math.max(0, Math.max(state.anchor - state.before, Math.min(state.anchor + state.after, absolute)) - state.preview.start);
+                const absolute = state.windowStart + (event.clientX - box.left) / box.width * (state.windowEnd - state.windowStart);
+                state.video.pause(); state.video.currentTime = Math.max(0, Math.max(state.start, Math.min(state.end, absolute)) - state.preview.start);
             };
             (document.fullscreenElement || document.body).append(dialog);
             document.body.classList.add('jfc-open');
