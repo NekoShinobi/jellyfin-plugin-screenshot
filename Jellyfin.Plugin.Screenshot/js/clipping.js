@@ -17,7 +17,8 @@
 
     function clipUrl(state, id, download = false) {
         const url = new URL(`${state.context.server}/Screenshot/clips/${encodeURIComponent(id)}`);
-        url.searchParams.set('api_key', state.context.token);
+        // Video elements and native downloads cannot attach an Authorization header.
+        url.searchParams.set('ApiKey', state.context.token);
         if (download) url.searchParams.set('download', 'true');
         return url.href;
     }
@@ -26,7 +27,7 @@
         if (!id) return;
         try {
             await fetch(`${state.context.server}/Screenshot/clips/${encodeURIComponent(id)}`, {
-                method: 'DELETE', headers: { 'X-Emby-Token': state.context.token }, keepalive: true
+                method: 'DELETE', headers: state.context.authorizationHeaders, keepalive: true
             });
         } catch (_) { /* Expiry cleanup handles disconnected clients. */ }
     }
@@ -37,7 +38,7 @@
         state.request = controller;
         const response = await fetch(`${context.server}/Screenshot/clips`, {
             method: 'POST', signal: controller.signal,
-            headers: { 'Content-Type': 'application/json', 'X-Emby-Token': context.token },
+            headers: { 'Content-Type': 'application/json', ...context.authorizationHeaders },
             body: JSON.stringify({
                 ItemId: context.itemId, MediaSourceId: context.mediaSourceId,
                 AnchorTicks: context.anchorTicks,
@@ -186,14 +187,14 @@
         state.video.removeAttribute('src'); state.video.load();
         const previous = state.preview;
         state.preview = null;
-        if (previous) await release(state, previous.id);
-        if (current !== state) return;
         state.$('.jfc-loading').hidden = false;
         state.$('.jfc-spinner').hidden = false;
         state.$('.jfc-loading-label').textContent = 'Preparing your preview…';
         state.$('.jfc-retry').hidden = true;
         status(state, 'The first preview may take a little longer while the video and subtitles are prepared.');
         update(state);
+        if (previous) await release(state, previous.id);
+        if (current !== state) return;
         try {
             const preview = await create(state, true);
             state.preview = preview;

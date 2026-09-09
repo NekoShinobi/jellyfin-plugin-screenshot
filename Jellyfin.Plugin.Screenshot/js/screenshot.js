@@ -138,7 +138,8 @@
             mediaSourceId: session.PlayState?.MediaSourceId,
             audioStreamIndex: session.PlayState?.AudioStreamIndex,
             subtitleStreamIndex: session.PlayState?.SubtitleStreamIndex,
-            server: ApiClient.serverAddress().replace(/\/$/, ''), token: ApiClient.accessToken()
+            server: ApiClient.serverAddress().replace(/\/$/, ''), token: ApiClient.accessToken(),
+            authorizationHeaders: getAuthorizationHeaders()
         };
     }
 
@@ -247,15 +248,24 @@
         document.querySelector('[data-screenshot-capture-backdrop]')?.remove();
     }
 
+    // MediaBrowser authorization is supported with legacy authorization disabled on
+    // both Jellyfin 10.11 and 12. Use the signed-in client's token and device identity.
+    function getAuthorizationHeaders() {
+        const token = ApiClient.accessToken();
+        if (!token) throw new Error('Please sign in to Jellyfin again to capture media.');
+        const quote = value => JSON.stringify(String(value));
+        return { Authorization: `MediaBrowser Token=${quote(token)}, DeviceId=${quote(ApiClient.deviceId())}` };
+    }
+
     /**
      * Returns this client's active Jellyfin playback session.
      */
     async function getCurrentSession(itemId) {
         try {
             const serverAddress = ApiClient.serverAddress().replace(/\/$/, '');
-            const apiKey = ApiClient.accessToken();
-            const sessionsUrl = `${serverAddress}/Sessions?api_key=${encodeURIComponent(apiKey)}`;
-            const res = await fetch(sessionsUrl);
+            const deviceId = ApiClient.deviceId();
+            const sessionsUrl = `${serverAddress}/Sessions?DeviceId=${encodeURIComponent(deviceId)}`;
+            const res = await fetch(sessionsUrl, { headers: getAuthorizationHeaders() });
 
             if (!res.ok) {
                 console.warn(LOG_PREFIX, 'Sessions API returned', res.status);
@@ -263,7 +273,6 @@
             }
 
             const sessions = await res.json();
-            const deviceId = ApiClient.deviceId();
             return sessions.find(session =>
                 session.DeviceId === deviceId && session.NowPlayingItem?.Id === itemId
             ) || sessions.find(session => session.DeviceId === deviceId) || null;
@@ -479,7 +488,7 @@
             + (includeSubtitles
                 ? `&subtitleStreamIndex=${subtitleStreamIndex}`
                 : '')
-            + `&api_key=${encodeURIComponent(apiKey)}`;
+            + `&ApiKey=${encodeURIComponent(apiKey)}`;
 
         console.log(LOG_PREFIX, 'Download URL (key redacted):', url.replace(apiKey, '[REDACTED]'));
 

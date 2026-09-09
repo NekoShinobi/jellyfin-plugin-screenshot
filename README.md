@@ -81,8 +81,8 @@ dotnet build -c Release -p:JellyfinVersion=12.0.0
 
 The packaged DLL and `meta.json` are written to:
 
-- `Jellyfin.Plugin.Screenshot/bin/Release/net9.0/Screenshot Capture_2.1.0.0/`
-- `Jellyfin.Plugin.Screenshot/bin/Release/net10.0/Screenshot Capture_3.1.0.0/`
+- `Jellyfin.Plugin.Screenshot/bin/Release/net9.0/Screenshot Capture_2.1.1.0/`
+- `Jellyfin.Plugin.Screenshot/bin/Release/net10.0/Screenshot Capture_3.1.1.0/`
 
 Intermediate files are isolated by server version, so switching between builds does
 not require cleaning. `build.yaml` describes the default 10.11 package;
@@ -124,3 +124,7 @@ optionally `CLIP_BROWSER_OUTPUT` for screenshots and results. It verifies previe
 playback, filmstrip generation, trim bounds, keyboard/pointer controls, fixed anchors,
 selected tracks, browser/native downloads, retry/cancellation, and mobile media bounds.
 This fixture does not replace testing against a deployed Jellyfin server.
+
+### Authentication compatibility
+
+Session lookup and clip creation/cleanup use the signed-in client’s token in the standard `Authorization: MediaBrowser` header. Preview video and native downloads use Jellyfin’s supported `ApiKey` query parameter. Both Jellyfin 10.11 and 12 work with legacy authorization disabled; no server authentication setting needs to change.

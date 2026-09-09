@@ -3,6 +3,7 @@ Uses the actual injected JS/CSS, a local API fixture, and real browser video pla
 """
 import json, os, threading, uuid
 from pathlib import Path
+from urllib.parse import urlsplit, parse_qs
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from playwright.sync_api import sync_playwright
 
@@ -12,6 +13,8 @@ video = Path(os.environ['CLIP_FIXTURE_VIDEO']).read_bytes()
 output = Path(os.environ.get('CLIP_BROWSER_OUTPUT', '/tmp/clip-browser-checks'))
 output.mkdir(parents=True, exist_ok=True)
 requests = []
+unauthorized = []
+authenticated = []
 settings = {'anchor':70,'runtime':200,'fail':False,'delay':False}
 item = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 
@@ -22,6 +25,20 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code); self.send_header('Content-Type', mime); self.send_header('Content-Length',len(data)); self.end_headers()
         try: self.wfile.write(data)
         except (BrokenPipeError, ConnectionResetError): pass
+    def authorize(self, media=False):
+        query = parse_qs(urlsplit(self.path).query)
+        header = self.headers.get('Authorization', '')
+        valid = (query.get('ApiKey') == ['fixture-token'] if media else
+                 header.startswith('MediaBrowser ') and 'Token="fixture-token"' in header
+                 and 'DeviceId="fixture-device"' in header)
+        # Model a server with legacy authorization disabled, including media range requests.
+        valid = valid and 'api_key' not in query and not self.headers.get('X-Emby-Token')
+        if not valid:
+            unauthorized.append((self.command, urlsplit(self.path).path))
+            self.send('Unauthorized', 'text/plain', 401)
+            return False
+        authenticated.append((self.command, urlsplit(self.path).path))
+        return True
     def do_GET(self):
         path = self.path.split('?')[0]
         if path == '/material-icons.woff2' and (output/'material-icons.woff2').exists():
@@ -34,8 +51,12 @@ class Handler(BaseHTTPRequestHandler):
             <script src="/jellyfin/Screenshot/script"></script></body></html>""", 'text/html')
         elif path == '/jellyfin/Screenshot/script': self.send((assets/'screenshot.js').read_text()+'\n;\n'+(assets/'clipping.js').read_text(), 'application/javascript')
         elif path == '/jellyfin/Screenshot/clipping.css': self.send((assets/'clipping.css').read_bytes(), 'text/css')
-        elif path == '/jellyfin/Sessions': self.send(json.dumps([{'DeviceId':'fixture-device','NowPlayingItem':{'Id':item,'Name':'Aspect ratio test','RunTimeTicks':settings['runtime']*10000000},'PlayState':{'PositionTicks':settings['anchor']*10000000,'MediaSourceId':'selected-version','AudioStreamIndex':1,'SubtitleStreamIndex':2}}]))
+        elif path == '/jellyfin/Sessions':
+            if not self.authorize(): return
+            assert parse_qs(urlsplit(self.path).query).get('DeviceId') == ['fixture-device']
+            self.send(json.dumps([{'DeviceId':'fixture-device','NowPlayingItem':{'Id':item,'Name':'Aspect ratio test','RunTimeTicks':settings['runtime']*10000000},'PlayState':{'PositionTicks':settings['anchor']*10000000,'MediaSourceId':'selected-version','AudioStreamIndex':1,'SubtitleStreamIndex':2}}]))
         elif path.startswith('/jellyfin/Screenshot/clips/'):
+            if not self.authorize(media=True): return
             # Range requests exercise the video element just like FileStreamResult.
             start,end=0,len(video)-1
             if self.headers.get('Range'):
@@ -51,14 +72,15 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         body=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
         requests.append(body)
-        assert self.headers.get('X-Emby-Token')=='fixture-token'
+        if not self.authorize(): return
         if settings['fail']:
             self.send('Rendering failed for test.','text/plain',500);return
         if settings['delay']:
             import time;time.sleep(1)
         anchor=body['AnchorTicks'];start=max(0,anchor-body['BeforeTicks']);end=min(settings['runtime']*10000000,anchor+body['AfterTicks'])
         self.send(json.dumps({'Id':str(uuid.uuid4()),'Filename':'test-clip.mp4','StartTicks':start,'EndTicks':end}))
-    def do_DELETE(self):self.send('',code=204)
+    def do_DELETE(self):
+        if self.authorize(): self.send('',code=204)
 
 server=ThreadingHTTPServer(('127.0.0.1',0),Handler)
 threading.Thread(target=server.serve_forever,daemon=True).start()
@@ -101,6 +123,7 @@ with sync_playwright() as p:
     page.evaluate('window.jmpNative={startDownload:url=>window.nativeDownload=url}')
     page.locator('#screenshot-clip-btn').click();page.wait_for_function('document.querySelector(".jfc-export")?.disabled===false');page.locator('.jfc-export').click()
     page.wait_for_function('window.nativeDownload');assert 'download=true' in page.evaluate('window.nativeDownload')
+    assert page.request.get(page.evaluate('window.nativeDownload')).status == 200
     page.keyboard.press('Escape')
     # Error/retry and closing during preparation must leave no orphan dialog.
     settings['fail']=True
@@ -121,7 +144,9 @@ with sync_playwright() as p:
         page.screenshot(path=str(output/f'focus-mobile-{anchor}.png'),full_page=True)
         page.keyboard.press('Escape')
     assert not errors,errors
-    (output/'browser-checks.json').write_text(json.dumps({'status':'passed','requests':len(requests),'errors':errors,'checks':['button injection','real preview playback and seeking','real thumbnails','16:9 contain','bounds and zero length','drag and keyboard trimming','fixed anchor','selected source/audio/subtitles','browser download','native download','retry','close during prepare','media boundaries','mobile overflow']},indent=2))
+    assert not unauthorized,unauthorized
+    assert any(method == 'DELETE' for method, _ in authenticated)
+    (output/'browser-checks.json').write_text(json.dumps({'status':'passed','requests':len(requests),'errors':errors,'checks':['modern authorization with legacy auth disabled','button injection','real preview playback and seeking','real thumbnails','16:9 contain','bounds and zero length','drag and keyboard trimming','fixed anchor','selected source/audio/subtitles','browser download','native download','retry','close during prepare','media boundaries','mobile overflow']},indent=2))
     browser.close()
 server.shutdown()
 print('PASS: production editor, real video playback/thumbnails, trimming, downloads, cancellation, retries, and mobile boundaries')
