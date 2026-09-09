@@ -16,7 +16,14 @@ Click or drag the thumbnail reel to scrub the preview anywhere in the fixed wind
 without changing the trim selection. Scrubbing pauses playback and stays paused on
 release. Focus the reel to seek with Left/Right arrows, Shift for five seconds, or
 Home/End for the window boundaries. The bottom-right Position badge shows the
-current source timestamp, and editor controls darken on hover.
+current source timestamp, and editor controls darken on hover. Dragging, scrolling over, or
+using arrow keys on a trim handle shows that boundary in the preview; changing
+Duration shows the end boundary. Scroll up/down moves a handle one second, or five
+with Shift. **Set start here** and **Set end here** use the current preview position.
+If that position would cross or meet the opposite boundary, the other boundary
+moves to preserve the previous duration, shortened only by the fixed window.
+An empty selection recovers with up to one second. Setting the start at the window
+end or the end at the window start is disabled to avoid an empty clip.
 
 The server prepares a preview of the surrounding window at up to
 960×540 and 24 fps, retaining lower source frame rates. Preview frames are resized
@@ -25,11 +32,16 @@ software preset for MP4. Clients without H.264/AAC playback (including some CEF
 builds used by Jellium/Desktop) request VP8/Opus WebM using a realtime encoder.
 The editor checks HTML video codec support before rendering and retries MP4 decode
 failures once with WebM when supported. MP4 exports keep H.264/AAC regardless of
-preview format. Frequent keyframes help seeking and thumbnail extraction. Preview
+preview format. Frequent keyframes help seeking. Preview
 compression is less efficient, so files can be larger within the existing bitrate
 limit; export quality and frame rate are unchanged. The complete window still needs
 to render before playback, so preparation time depends on server CPU and source
-decoding speed. It supports real playback, seeking, and a thumbnail filmstrip. The **16:9 preview box** fits the
+decoding speed. The server extracts an eight-frame JPEG filmstrip from the finished
+preview, avoiding a second video decoder and repeated thumbnail seeks on Desktop.
+The whole reel loads together; **Retry thumbnails** retries a failed image request
+without rendering another preview. Filmstrips use the same ownership and current
+library/download permission checks as previews, and are deleted with them.
+It supports real playback and seeking. The **16:9 preview box** fits the
 entire image with black bars as needed. These bars are **never added to the export**.
 MP4 exports retain the source display aspect ratio, use the selected audio track,
 and optionally burn in the selected text or bitmap subtitle track. H.264 requires
@@ -99,8 +111,8 @@ dotnet build -c Release -p:JellyfinVersion=12.0.0
 
 The packaged DLL and `meta.json` are written to:
 
-- `Jellyfin.Plugin.Screenshot/bin/Release/net9.0/Screenshot Capture_2.2.8.0/`
-- `Jellyfin.Plugin.Screenshot/bin/Release/net10.0/Screenshot Capture_3.2.8.0/`
+- `Jellyfin.Plugin.Screenshot/bin/Release/net9.0/Screenshot Capture_2.2.11.0/`
+- `Jellyfin.Plugin.Screenshot/bin/Release/net10.0/Screenshot Capture_3.2.11.0/`
 
 Intermediate files are isolated by server version, so switching between builds does
 not require cleaning. `build.yaml` describes the default 10.11 package;
@@ -157,7 +169,7 @@ Preview controls stay visible during playback, including when the underlying pla
 
 ### Screenshot save notifications
 
-With the updated Jellyfin Desktop download bridge, the toast shows **Screenshot saved to:** followed by the actual full path after the download completes. This includes folder or filename changes in the save dialog. Cancellation and failed downloads have separate messages. Long paths wrap and remain visible for ten seconds.
+With the updated Jellyfin Desktop download bridge, the toast shows **Screenshot saved to:** followed by the actual full path after the download completes. This includes folder or filename changes in the save dialog. Cancellation and failed downloads have separate messages. Long paths wrap and remain visible for ten seconds. Notifications use isolated styling and a fixed expiry that does not pause on hover or focus. Click the notification body, use its dismiss button, or press Escape while focused to close it. Selecting a path for copying or using a download link does not dismiss it. Replacement and page exit clean up the old notification and its timer; clicks stay out of player controls.
 
 Standard browsers do not expose the local download destination or completion to page scripts. After preparing the image, the plugin attempts the browser download and shows the requested filename with a **Download screenshot** link for two minutes. If the automatic download does not start, click that link to save the same image without rendering again. The link stays inside the fullscreen player when applicable, and its click is isolated from player shortcuts. Browser feedback says the image is ready rather than claiming it has been saved; use the browser's download history for the actual destination. Older Desktop clients that only expose `startDownload` also keep working, but cannot report the full path. Installing the plugin alone does not add the required Desktop capability.
 

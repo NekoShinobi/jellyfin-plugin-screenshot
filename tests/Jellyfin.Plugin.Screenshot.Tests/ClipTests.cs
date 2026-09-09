@@ -231,6 +231,11 @@ public sealed class ClipTests
             var file = Assert.IsType<FileStreamResult>(controller.Get(id));
             Assert.True(file.EnableRangeProcessing); await file.FileStream.DisposeAsync();
             Assert.Equal("video/mp4", file.ContentType);
+            var filmstrip = Assert.IsType<FileStreamResult>(controller.Filmstrip(id));
+            Assert.Equal("image/jpeg", filmstrip.ContentType);
+            Assert.Equal("private, no-store", controller.Response.Headers.CacheControl.ToString());
+            Assert.True(filmstrip.FileStream.Length > 0);
+            await filmstrip.FileStream.DisposeAsync();
             request.PreviewFormat = "webm";
             var webmCreated = Assert.IsType<OkObjectResult>(await controller.Create(request, CancellationToken.None));
             var webmId = JsonSerializer.SerializeToElement(webmCreated.Value).GetProperty("Id").GetGuid();
@@ -246,7 +251,12 @@ public sealed class ClipTests
             Assert.Contains(webmStreams, stream => stream.GetProperty("codec_name").GetString() == "opus");
             Assert.Equal("4:3", webmStreams.Single(stream => stream.GetProperty("codec_type").GetString() == "video").GetProperty("display_aspect_ratio").GetString());
             Assert.InRange(double.Parse(webmProbe.RootElement.GetProperty("format").GetProperty("duration").GetString()!, System.Globalization.CultureInfo.InvariantCulture), 1.95, 2.1);
+            var webmStrip = Assert.IsType<FileStreamResult>(controller.Filmstrip(webmId));
+            Assert.True(webmStrip.FileStream.Length > 0);
+            await webmStrip.FileStream.DisposeAsync();
             clips.Remove(webmId, owner.Id);
+            Assert.False(File.Exists(webmClip.FilmstripPath));
+            Assert.IsType<NotFoundObjectResult>(controller.Filmstrip(webmId));
             // Linked versions need their own permission check, including on later GETs.
             var alternatePath = Path.Combine(root, "alternate.mkv"); File.Copy(input, alternatePath);
             var alternate = new Mock<Video> { CallBase = true };
@@ -262,6 +272,7 @@ public sealed class ClipTests
             var alternateFile = Assert.IsType<FileStreamResult>(controller.Get(alternateId)); await alternateFile.FileStream.DisposeAsync();
             alternate.Setup(v => v.IsVisibleStandalone(owner)).Returns(false);
             Assert.IsType<NotFoundObjectResult>(controller.Get(alternateId));
+            Assert.IsType<NotFoundObjectResult>(controller.Filmstrip(alternateId));
             clips.Remove(alternateId, owner.Id);
             request.MediaSourceId = source.Id;
             sources.Setup(m => m.GetStaticMediaSources(item.Object, false, owner)).Returns(new[] { source });
@@ -276,6 +287,8 @@ public sealed class ClipTests
                 var selectedId = JsonSerializer.SerializeToElement(selectedResult.Value).GetProperty("Id").GetGuid();
                 var selectedClip = Assert.IsType<StoredClip>(clips.Find(selectedId, owner.Id));
                 Assert.Equal(selection, selectedClip.Range);
+                Assert.IsType<NotFoundObjectResult>(controller.Filmstrip(selectedId));
+                Assert.False(File.Exists(selectedClip.FilmstripPath));
                 Assert.EndsWith(".mp4", selectedClip.Filename);
                 Assert.Equal("video/mp4", selectedClip.ContentType);
                 Assert.True(new FileInfo(selectedClip.Path).Length > 0);
@@ -292,6 +305,7 @@ public sealed class ClipTests
             Assert.IsType<NotFoundObjectResult>(await screenshotController.CaptureScreenshot(item.Object.Id, 2 * Second, source.Id, null, CancellationToken.None));
             // Previously generated clips are also denied when library visibility changes.
             Assert.IsType<NotFoundObjectResult>(controller.Get(id));
+            Assert.IsType<NotFoundObjectResult>(controller.Filmstrip(id));
             item.Setup(v => v.IsVisibleStandalone(owner)).Returns(true);
             encoder.SetupGet(e => e.EncoderPath).Returns(ffmpeg);
 
@@ -300,15 +314,18 @@ public sealed class ClipTests
             users.Setup(u => u.GetUserById(otherUser.Id)).Returns(otherUser);
             controller.HttpContext.User = new ClaimsPrincipal(new ClaimsIdentity(new[] { new Claim("Jellyfin-UserId", otherUser.Id.ToString()) }, "test"));
             Assert.IsType<NotFoundObjectResult>(controller.Get(id));
+            Assert.IsType<NotFoundObjectResult>(controller.Filmstrip(id));
             Assert.IsType<NoContentResult>(controller.Delete(id));
             Assert.True(File.Exists(stored.Path));
             controller.HttpContext.User = new ClaimsPrincipal(new ClaimsIdentity(new[] { new Claim("Jellyfin-UserId", owner.Id.ToString()) }, "test"));
 
             item.Setup(v => v.IsAuthorizedToDownload(owner)).Returns(false);
             Assert.IsType<NotFoundObjectResult>(controller.Get(id));
+            Assert.IsType<NotFoundObjectResult>(controller.Filmstrip(id));
             Assert.IsType<NotFoundObjectResult>(await controller.Create(request, CancellationToken.None));
             clips.Remove(id, owner.Id);
             Assert.False(File.Exists(stored.Path));
+            Assert.False(File.Exists(stored.FilmstripPath));
             Assert.Null(clips.Find(id, owner.Id));
 
             // Cancellation kills a running encoder and permits temporary-file deletion.
@@ -316,6 +333,45 @@ public sealed class ClipTests
             var live = new ProcessStartInfo(ffmpeg) { UseShellExecute = false, RedirectStandardError = true };
             foreach (var arg in new[] { "-re", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=25", "-f", "null", "-" }) live.ArgumentList.Add(arg);
             await Assert.ThrowsAnyAsync<OperationCanceledException>(() => ClipEncoder.RunAsync(live, cts.Token));
+        }
+        finally { Directory.Delete(root, true); }
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task FilmstripCoversWholePreviewIncludingSingleFrame(bool webm, bool singleFrame)
+    {
+        var ffmpeg = Environment.GetEnvironmentVariable("SCREENSHOT_FFMPEG");
+        var ffprobe = Environment.GetEnvironmentVariable("SCREENSHOT_FFPROBE");
+        if (string.IsNullOrEmpty(ffmpeg) || string.IsNullOrEmpty(ffprobe)) return;
+        var root = Path.Combine(Path.GetTempPath(), "filmstrip-" + Guid.NewGuid());
+        Directory.CreateDirectory(root);
+        try
+        {
+            var input = Path.Combine(root, "source.mkv");
+            var preview = Path.Combine(root, webm ? "preview.webm" : "preview.mp4");
+            var strip = Path.Combine(root, "filmstrip.jpg");
+            // Every second has a different gray value, so blank/repeated tail tiles fail.
+            await Run(ffmpeg, "-v", "error", "-f", "lavfi", "-i", "nullsrc=s=160x90:r=1:d=8,geq=lum='32+N*24':cb=128:cr=128", "-c:v", "ffv1", "-threads", "2", "-y", input);
+            var duration = singleFrame ? Second / 25 : 8 * Second;
+            await ClipEncoder.RunAsync(ClipEncoder.Build(ffmpeg, input, preview, new ClipRange(0, duration), 0, null, true, null, null, false, webm), CancellationToken.None);
+            await ClipEncoder.RunAsync(ClipEncoder.BuildFilmstrip(ffmpeg, preview, strip, duration), CancellationToken.None);
+            using var probe = JsonDocument.Parse(await Run(ffprobe, "-v", "error", "-show_streams", "-of", "json", strip));
+            var stream = probe.RootElement.GetProperty("streams")[0];
+            Assert.Equal(1280, stream.GetProperty("width").GetInt32());
+            Assert.Equal(90, stream.GetProperty("height").GetInt32());
+            Assert.Equal("mjpeg", stream.GetProperty("codec_name").GetString());
+            for (var index = 0; index < 8; index++)
+            {
+                var stats = await Run(ffmpeg, "-v", "error", "-threads", "2", "-filter_threads", "2", "-i", strip, "-vf", $"crop=160:90:{index * 160}:0,scale=in_range=full:out_range=limited,format=yuv420p,signalstats,metadata=mode=print:key=lavfi.signalstats.YAVG:file=-", "-f", "null", "-");
+                var match = System.Text.RegularExpressions.Regex.Match(stats, @"lavfi.signalstats.YAVG=([0-9.]+)");
+                var luma = double.Parse(match.Groups[1].Value, System.Globalization.CultureInfo.InvariantCulture);
+                var expected = 32 + (singleFrame ? 0 : index * 24);
+                Assert.InRange(luma, expected - 4, expected + 4);
+            }
         }
         finally { Directory.Delete(root, true); }
     }

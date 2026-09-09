@@ -11,6 +11,7 @@ namespace Jellyfin.Plugin.Screenshot.Services;
 
 internal sealed record StoredClip(Guid Id, Guid UserId, Guid ItemId, string Path, string Filename, ClipRange Range, bool Preview, DateTime Expires, Guid SourceItemId)
 {
+    public string FilmstripPath => Path + ".jpg";
     public string ContentType => System.IO.Path.GetExtension(Path) == ".webm" ? "video/webm" : "video/mp4";
 }
 internal sealed class ClipBusyException : Exception { }
@@ -97,6 +98,12 @@ public sealed class ClipService : IDisposable
             _logger.LogInformation("Starting FFmpeg for clip {ClipId}: {Width}x{Height}, HDR={Hdr}, subtitles={Subtitles}", id, video.Width, video.Height, hdr, request.SubtitleStreamIndex.HasValue);
             await ClipEncoder.RunAsync(info, timeout.Token).ConfigureAwait(false);
             if (!File.Exists(output) || new FileInfo(output).Length == 0) throw new InvalidOperationException("FFmpeg produced no clip.");
+            if (request.Preview)
+            {
+                await ClipEncoder.RunAsync(ClipEncoder.BuildFilmstrip(_encoder.EncoderPath, output, output + ".jpg", range.DurationTicks), timeout.Token).ConfigureAwait(false);
+                if (!File.Exists(output + ".jpg") || new FileInfo(output + ".jpg").Length == 0)
+                    throw new InvalidOperationException("FFmpeg produced no filmstrip.");
+            }
             timeout.Token.ThrowIfCancellationRequested();
             var safeName = string.Concat(item.Name.Select(c => char.IsControl(c) || "<>:\"/\\|?*".Contains(c) ? '_' : c)).Trim().TrimEnd('.');
             if (safeName.Length > 100) safeName = safeName[..100];
@@ -116,7 +123,7 @@ public sealed class ClipService : IDisposable
         {
             if (!retained) _logger.LogInformation("Clip {ClipId} preparation ended without output after {ElapsedSeconds:F1}s", id, elapsed.Elapsed.TotalSeconds);
             DeleteFile(assFile);
-            if (!retained) DeleteFile(output);
+            if (!retained) { DeleteFile(output); DeleteFile(output + ".jpg"); }
             lock (_gate) _active.Remove(userId);
         }
     }
@@ -133,6 +140,7 @@ public sealed class ClipService : IDisposable
             if (_clips.TryGetValue(id, out var clip) && clip.UserId == userId)
             {
                 DeleteFile(clip.Path);
+                DeleteFile(clip.FilmstripPath);
                 _clips.Remove(id);
             }
         }

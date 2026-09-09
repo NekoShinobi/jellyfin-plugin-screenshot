@@ -102,6 +102,22 @@ public sealed class ClipController : ControllerBase
         catch (FileNotFoundException) { return NotFound("The clip has expired."); }
     }
 
+    /// <summary>Returns the complete preview filmstrip after rechecking media access.</summary>
+    [HttpGet("{id:guid}/filmstrip")]
+    public ActionResult Filmstrip(Guid id)
+    {
+        var clip = _clips.Find(id, UserId);
+        if (clip is null || !clip.Preview || AccessibleVideo(clip.ItemId) is null || AccessibleVideo(clip.SourceItemId) is null)
+            return NotFound("The preview has expired or is unavailable.");
+        try
+        {
+            var stream = new FileStream(clip.FilmstripPath, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
+            Response.Headers.CacheControl = "private, no-store";
+            return new FileStreamResult(stream, "image/jpeg");
+        }
+        catch (FileNotFoundException) { return NotFound("The preview has expired."); }
+    }
+
     /// <summary>Releases a prepared preview or download belonging to this user.</summary>
     [HttpDelete("{id:guid}")]
     public ActionResult Delete(Guid id)

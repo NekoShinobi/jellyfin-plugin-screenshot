@@ -409,15 +409,20 @@
         return `${name}${episodeCode}-${padNumber(hours)}-${padNumber(minutes)}-${padNumber(seconds)}.jpg`;
     }
 
+    let dismissActiveToast = null;
+
     function showFallbackToast(message, duration = 5_000) {
+        dismissActiveToast?.();
         document.getElementById('screenshot-capture-toast')?.remove();
 
         const toast = document.createElement('div');
         toast.id = 'screenshot-capture-toast';
-        toast.className = 'toast';
+        toast.className = 'screenshot-capture-toast';
         toast.setAttribute('role', 'status');
         toast.setAttribute('aria-live', 'polite');
-        toast.textContent = message;
+        const text = document.createElement('span');
+        text.textContent = message;
+        toast.appendChild(text);
         toast.style.cssText = [
             'position:fixed',
             'left:50%',
@@ -425,7 +430,9 @@
             'transform:translateX(-50%)',
             'z-index:100000',
             'max-width:min(90vw,42em)',
-            'padding:.9em 1.25em',
+            'padding:.9em 2.75em .9em 1.25em',
+            'box-sizing:border-box',
+            'pointer-events:auto',
             'border-radius:.3em',
             'background:rgba(32,32,32,.96)',
             'color:#fff',
@@ -435,28 +442,42 @@
             'overflow-wrap:anywhere',
             'white-space:pre-wrap'
         ].join(';');
+        const previousFocus = document.activeElement;
+        const dismiss = () => {
+            clearTimeout(timer);
+            window.removeEventListener('pagehide', dismiss);
+            const restoreFocus = toast.contains(document.activeElement);
+            toast.remove();
+            if (dismissActiveToast === dismiss) dismissActiveToast = null;
+            if (restoreFocus && previousFocus?.isConnected) previousFocus.focus({ preventScroll: true });
+        };
+        const close = document.createElement('button');
+        close.type = 'button';
+        close.setAttribute('aria-label', 'Dismiss notification');
+        close.style.cssText = 'position:absolute;right:.4em;top:.4em;display:grid;place-items:center;width:30px;height:30px;padding:6px;border:0;border-radius:4px;background:transparent;color:inherit;cursor:pointer';
+        close.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 3l10 10M13 3L3 13" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>';
+        close.onclick = dismiss;
+        toast.appendChild(close);
+        toast.addEventListener('click', event => {
+            // Keep links usable, including the automatic browser download click.
+            // Selecting a saved path should still allow copying it.
+            if (!event.target.closest('a,button') && !window.getSelection()?.toString()) dismiss();
+        });
+        toast.addEventListener('keydown', event => {
+            if (event.key === 'Escape') { event.preventDefault(); dismiss(); }
+        });
+        for (const type of ['click', 'dblclick', 'pointerdown', 'pointerup', 'mousedown', 'mouseup', 'keydown', 'keyup']) {
+            toast.addEventListener(type, event => event.stopPropagation());
+        }
+        // Interaction never cancels or extends this deadline.
+        const timer = setTimeout(dismiss, duration);
+        dismissActiveToast = dismiss;
+        window.addEventListener('pagehide', dismiss, { once: true });
         (document.fullscreenElement || document.body).appendChild(toast);
-        setTimeout(() => toast.remove(), duration);
         return toast;
     }
 
     async function showToast(message) {
-        const toastModule = await loadJellyfinModule('toast');
-        const jellyfinToast = toastModule?.default || toastModule;
-
-        try {
-            if (typeof jellyfinToast === 'function') {
-                jellyfinToast(message);
-                return;
-            }
-            if (typeof jellyfinToast?.show === 'function') {
-                jellyfinToast.show(message);
-                return;
-            }
-        } catch (error) {
-            console.debug(LOG_PREFIX, 'Jellyfin toast failed:', error);
-        }
-
         showFallbackToast(message);
     }
 
@@ -471,10 +492,6 @@
         link.textContent = 'Download screenshot';
         link.style.cssText = 'display:inline-block;margin-top:.5em;color:inherit;text-decoration:underline;cursor:pointer;pointer-events:auto';
         toast.append(document.createElement('br'), link);
-        // Player shortcuts must not cancel the link's default download action.
-        for (const type of ['click', 'keydown', 'keyup']) {
-            toast.addEventListener(type, event => event.stopPropagation());
-        }
         const release = () => {
             clearTimeout(timer);
             URL.revokeObjectURL(blobUrl);

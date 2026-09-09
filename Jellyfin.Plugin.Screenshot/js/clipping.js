@@ -152,7 +152,7 @@
         });
         if (seek && state.ready) {
             state.video.pause();
-            state.video.currentTime = Math.max(0, state.start - state.preview.start);
+            state.video.currentTime = Math.max(0, Math.min(state.video.duration, (seek === 'end' ? state.end : state.start) - state.preview.start));
         }
         clock(state);
     }
@@ -160,6 +160,9 @@
     function clock(state) {
         const absolute = state.preview ? state.preview.start + state.video.currentTime : state.start;
         state.$('.jfc-preview-time-value').textContent = time(absolute);
+        const unavailable = !state.ready || state.busy || !Number.isFinite(absolute);
+        state.$('[data-jfc-set-position="start"]').disabled = unavailable || absolute >= state.windowEnd;
+        state.$('[data-jfc-set-position="end"]').disabled = unavailable || absolute <= state.windowStart;
         const scrubber = state.$('.jfc-scrubber');
         scrubber.disabled = !state.ready || state.busy;
         scrubber.setAttribute('aria-valuemin', state.windowStart);
@@ -187,57 +190,87 @@
         } else {
             state.end = state.start + Math.max(0, Math.min(state.windowEnd - state.start, number));
         }
-        update(state, true);
+        update(state, field === 'duration' ? 'end' : true);
     }
 
     function setEndpoint(state, side, value) {
         if (side === 'start') state.start = Math.max(state.windowStart, Math.min(state.end, value));
         else state.end = Math.max(state.start, Math.min(state.windowEnd, value));
-        update(state, true);
+        update(state, side === 'end' ? 'end' : true);
+    }
+
+    function setEndpointHere(state, side) {
+        if (!state.ready || state.busy || !state.preview) return;
+        const position = Math.max(state.windowStart, Math.min(state.windowEnd, state.preview.start + state.video.currentTime));
+        if (!Number.isFinite(position) || (side === 'start' ? position >= state.windowEnd : position <= state.windowStart)) return;
+        state.video.pause();
+        // Keep the opposite endpoint unless it would cross this one. Recover an
+        // empty selection with one second; otherwise preserve its previous length.
+        const duration = state.end > state.start ? state.end - state.start : 1;
+        if (side === 'start') {
+            state.start = position;
+            if (state.end <= position) state.end = Math.min(state.windowEnd, position + duration);
+        } else {
+            state.end = position;
+            if (state.start >= position) state.start = Math.max(state.windowStart, position - duration);
+        }
+        update(state);
     }
 
     async function thumbnails(state, preview) {
-        const helper = document.createElement('video');
-        helper.dataset.clipPreview = 'true';
-        helper.muted = true;
-        helper.crossOrigin = 'anonymous';
-        helper.preload = 'auto';
-        state.thumbnailVideo = helper;
-        const wait = event => new Promise((resolve, reject) => {
-            const timer = setTimeout(() => finish(new Error('Thumbnail unavailable')), 5000);
-            const done = () => finish();
-            const fail = () => finish(new Error('Thumbnail unavailable'));
-            function finish(error) {
-                clearTimeout(timer); helper.removeEventListener(event, done); helper.removeEventListener('error', fail);
-                if (error) reject(error); else resolve();
-            }
-            helper.addEventListener(event, done, { once: true }); helper.addEventListener('error', fail, { once: true });
-        });
+        state.thumbnailRequest?.abort();
+        const request = new AbortController();
+        state.thumbnailRequest = request;
+        const retry = state.$('.jfc-thumbnail-retry');
+        retry.hidden = true;
+        const timer = setTimeout(() => request.abort(), MEDIA_TIMEOUT);
+        let url;
         try {
-            const loaded = wait('loadeddata');
-            helper.src = clipUrl(state, preview.id);
-            await loaded;
+            const response = await fetch(`${state.context.server}/Screenshot/clips/${encodeURIComponent(preview.id)}/filmstrip`, {
+                headers: state.context.authorizationHeaders, signal: request.signal
+            });
+            if (!response.ok) throw new Error('Filmstrip unavailable');
+            url = URL.createObjectURL(await response.blob());
+            const sprite = new Image();
+            await new Promise((resolve, reject) => {
+                const abort = () => finish(new Error('Filmstrip cancelled'));
+                function finish(error) {
+                    sprite.onload = sprite.onerror = null;
+                    request.signal.removeEventListener('abort', abort);
+                    if (error) reject(error); else resolve();
+                }
+                sprite.onload = () => finish();
+                sprite.onerror = () => finish(new Error('Filmstrip unavailable'));
+                request.signal.addEventListener('abort', abort, { once: true });
+                if (request.signal.aborted) abort(); else sprite.src = url;
+            });
+            if (current !== state || state.preview !== preview || request.signal.aborted) return;
+            if (sprite.naturalWidth !== 1280 || sprite.naturalHeight !== 90) throw new Error('Invalid filmstrip');
             const canvas = document.createElement('canvas');
-            canvas.width = 160; canvas.height = Math.max(1, Math.round(160 * helper.videoHeight / helper.videoWidth));
+            canvas.width = 160; canvas.height = 90;
             const context = canvas.getContext('2d');
-            const frames = state.$('.jfc-frames');
-            frames.replaceChildren();
+            const frames = document.createDocumentFragment();
             for (let index = 0; index < 8; index++) {
-                if (current !== state || state.preview !== preview) return;
-                const next = wait('seeked');
-                helper.currentTime = Math.min(helper.duration - .05, (index + .5) / 8 * helper.duration);
-                await next;
-                if (current !== state || state.preview !== preview) return;
-                context.drawImage(helper, 0, 0, canvas.width, canvas.height);
+                context.drawImage(sprite, index * 160, 0, 160, 90, 0, 0, 160, 90);
                 const frame = new Image();
-                frame.alt = ''; frame.draggable = false; frame.src = canvas.toDataURL('image/jpeg', .6); frames.append(frame);
+                frame.alt = ''; frame.draggable = false; frame.src = canvas.toDataURL('image/jpeg', .8); frames.append(frame);
             }
-        } catch (_) { /* Trimming and playback remain available without a filmstrip. */ }
-        finally { helper.removeAttribute('src'); helper.load(); }
+            // Commit together: a slow or failed request cannot leave a partial reel.
+            state.$('.jfc-frames').replaceChildren(frames);
+        } catch (_) {
+            if (current === state && state.preview === preview && state.thumbnailRequest === request) retry.hidden = false;
+        } finally {
+            clearTimeout(timer);
+            if (url) URL.revokeObjectURL(url);
+            if (state.thumbnailRequest === request) state.thumbnailRequest = null;
+        }
     }
 
     async function prepare(state) {
         state.request?.abort();
+        state.thumbnailRequest?.abort();
+        state.$('.jfc-frames').replaceChildren();
+        state.$('.jfc-thumbnail-retry').hidden = true;
         clearPreparationTimers(state);
         state.video.pause();
         state.ready = false; state.busy = true;
@@ -328,7 +361,7 @@
         clearPreparationTimers(state);
         state.request?.abort();
         state.video.pause(); state.video.removeAttribute('src'); state.video.load();
-        if (state.thumbnailVideo) { state.thumbnailVideo.removeAttribute('src'); state.thumbnailVideo.load(); }
+        state.thumbnailRequest?.abort();
         if (state.preview) release(state, state.preview.id);
         // Downloads are kept for 30 minutes so closing cannot race a native save dialog.
         state.dialog.close(); state.dialog.remove();
@@ -361,7 +394,8 @@
                     <div class="jfc-scale"><span class="jfc-window-start"></span><span class="jfc-window-end"></span><span class="jfc-anchor-label">Your moment</span></div>
                     <div class="jfc-timeline"><div class="jfc-frames" aria-hidden="true"></div><div class="jfc-left"></div><div class="jfc-right"></div><div class="jfc-selection"></div><div class="jfc-anchor"></div><button class="jfc-scrubber" role="slider" aria-label="Preview position" aria-orientation="horizontal"></button><div class="jfc-playhead"></div>
                         <button class="jfc-handle jfc-start" role="slider" aria-label="Clip start"></button><button class="jfc-handle jfc-end" role="slider" aria-label="Clip end"></button></div>
-                    <p class="jfc-hint">Drag the handles to trim. Click or drag the filmstrip to scrub.</p></div>
+                    <p class="jfc-hint">Drag or scroll the handles to trim. Click or drag the filmstrip to scrub. <button class="jfc-thumbnail-retry" hidden>Retry thumbnails</button></p></div>
+                    <div class="jfc-position-actions"><button data-jfc-set-position="start" title="Set clip start to the current preview position">${icon('first_page')}<span>Set start here</span></button><button data-jfc-set-position="end" title="Set clip end to the current preview position">${icon('last_page')}<span>Set end here</span></button></div>
                     <div class="jfc-fields">
                         <div class="jfc-field"><label for="jfc-start">Starting point</label><div class="jfc-input-row"><button data-jfc-adjust="start:-5" aria-label="Move start 5 seconds earlier">−</button><input id="jfc-start" type="number" min="0" max="60" step="0.1"><span class="jfc-unit">sec</span><button data-jfc-adjust="start:5" aria-label="Move start 5 seconds later">+</button></div><span class="jfc-boundary jfc-start-time"></span></div>
                         <div class="jfc-field"><label for="jfc-duration">Duration</label><div class="jfc-input-row"><button data-jfc-adjust="duration:-5" aria-label="Shorten duration by 5 seconds">−</button><input id="jfc-duration" type="number" min="0" max="60" step="0.1"><span class="jfc-unit">sec</span><button data-jfc-adjust="duration:5" aria-label="Extend duration by 5 seconds">+</button></div><span class="jfc-boundary jfc-end-time"></span></div>
@@ -386,6 +420,7 @@
                 dialog.addEventListener(type, event => event.stopPropagation());
             }
             state.$('.jfc-retry').onclick = () => prepare(state);
+            state.$('.jfc-thumbnail-retry').onclick = () => { if (state.preview) thumbnails(state, state.preview); };
             state.$('#jfc-subtitles').onchange = () => prepare(state);
             state.$('.jfc-export').onclick = () => exportClip(state);
             state.$('.jfc-play').onclick = async () => {
@@ -427,6 +462,7 @@
             for (const side of ['start', 'duration']) state.$(`#jfc-${side}`).oninput = event => setSelection(state, side, event.target.value);
             dialog.querySelectorAll('[data-jfc-adjust]').forEach(el => el.onclick = () => { const [side, change] = el.dataset.jfcAdjust.split(':'); setSelection(state, side, (side === 'duration' ? state.end - state.start : state.start) + Number(change)); });
             dialog.querySelectorAll('[data-jfc-preset]').forEach(el => el.onclick = () => { const [before, after] = el.dataset.jfcPreset.split(',').map(Number); state.start = Math.max(state.windowStart, state.anchor - before); state.end = Math.min(state.windowEnd, state.anchor + after); update(state, true); });
+            dialog.querySelectorAll('[data-jfc-set-position]').forEach(button => { button.onclick = () => setEndpointHere(state, button.dataset.jfcSetPosition); });
             for (const [selector, side] of [['.jfc-start', 'start'], ['.jfc-end', 'end']]) {
                 const handle = state.$(selector); let dragging = false;
                 const move = event => { const box = state.$('.jfc-timeline').getBoundingClientRect(); const position = state.windowStart + (event.clientX - box.left) / box.width * (state.windowEnd - state.windowStart); setEndpoint(state, side, position); };
@@ -434,6 +470,12 @@
                 handle.onpointermove = event => { if (dragging) move(event); };
                 handle.onpointerup = handle.onpointercancel = event => { dragging = false; if (handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId); };
                 handle.onlostpointercapture = () => { dragging = false; };
+                handle.addEventListener('wheel', event => {
+                    const delta = event.deltaY || event.deltaX;
+                    if (!state.ready || state.busy || event.ctrlKey || !delta) return;
+                    event.preventDefault(); event.stopPropagation();
+                    setEndpoint(state, side, state[side] - Math.sign(delta) * (event.shiftKey ? 5 : 1));
+                }, { passive: false });
                 handle.onkeydown = event => {
                     const step = event.shiftKey ? 5 : 1;
                     let target = state[side];

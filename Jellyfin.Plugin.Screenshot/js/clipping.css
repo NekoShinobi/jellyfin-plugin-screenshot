@@ -47,3 +47,15 @@ body.jfc-open #jfclip-editor .jfc-scrubber.jfc-scrubbing{cursor:grabbing!importa
 body.jfc-open #jfclip-editor .jfc-scrubber:disabled{cursor:not-allowed!important}
 
 #jfclip-editor .jfc-presets button:hover:not(:disabled){background:#080d12}
+
+#jfclip-editor .jfc-position-actions{display:flex;gap:10px;margin:0 0 18px}
+#jfclip-editor .jfc-position-actions button{display:flex;align-items:center;justify-content:center;gap:7px;flex:1;padding:8px 10px;border:1px solid #3d4c56;border-radius:5px;background:#11171c;font-size:12px}
+#jfclip-editor .jfc-position-actions button:hover:not(:disabled){background:#080d12}
+#jfclip-editor .jfc-position-actions .jfc-icon{font-size:20px}
+
+body #screenshot-capture-toast,body #screenshot-capture-toast *{cursor:auto!important}
+body #screenshot-capture-toast button,body #screenshot-capture-toast button *,body #screenshot-capture-toast a{cursor:pointer!important}
+#screenshot-capture-toast button:hover{background:#080d12!important}
+#screenshot-capture-toast button:focus-visible,#screenshot-capture-toast a:focus-visible{outline:2px solid currentColor;outline-offset:2px}
+
+#jfclip-editor .jfc-thumbnail-retry{padding:4px 8px;border:1px solid #3d4c56;border-radius:5px;color:#d0dce4;margin-left:6px}

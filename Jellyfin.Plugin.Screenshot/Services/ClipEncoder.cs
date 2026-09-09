@@ -20,6 +20,24 @@ internal static class ClipEncoder
         throw new ArgumentException("The selected stream is unavailable.");
     }
 
+    // Reuse the small, tone-mapped/subtitled preview; pad short inputs to eight tiles.
+    internal static ProcessStartInfo BuildFilmstrip(string encoder, string input, string output, long durationTicks)
+    {
+        var duration = ((decimal)durationTicks / TimeSpan.TicksPerSecond).ToString("0.#######", CultureInfo.InvariantCulture);
+        var info = new ProcessStartInfo(encoder)
+        {
+            UseShellExecute = false,
+            RedirectStandardError = true,
+            CreateNoWindow = true
+        };
+        string[] args = ["-hide_banner", "-nostdin", "-loglevel", "error", "-threads", "2", "-filter_threads", "2",
+            "-i", input, "-an", "-vf",
+            $"setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration={duration},fps=8/{duration},scale=w='max(160,90*dar)':h='max(90,160/dar)',setsar=1,crop=160:90,tile=8x1:nb_frames=8",
+            "-frames:v", "1", "-c:v", "mjpeg", "-threads", "2", "-q:v", "3", "-update", "1", "-y", output];
+        foreach (var arg in args) info.ArgumentList.Add(arg);
+        return info;
+    }
+
     internal static ProcessStartInfo Build(
         string encoder, string input, string output, ClipRange range,
         int videoIndex, int? audioIndex, bool preview,

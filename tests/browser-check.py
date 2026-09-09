@@ -1,5 +1,6 @@
 """Run with Playwright and CLIP_FIXTURE_VIDEO pointing to a >=120-second H.264 MP4.
 CLIP_FIXTURE_WEBM points to its VP8/Opus equivalent (defaults to the same path with .webm).
+CLIP_FIXTURE_FILMSTRIP is an eight-tile 1280x90 JPEG (defaults to the MP4 path with .jpg).
 Uses the actual injected JS/CSS, a local API fixture, and real browser video playback.
 """
 import json, os, threading, uuid
@@ -12,6 +13,7 @@ repo = Path(__file__).resolve().parents[1]
 assets = repo / 'Jellyfin.Plugin.Screenshot/js'
 video = Path(os.environ['CLIP_FIXTURE_VIDEO']).read_bytes()
 webm_video = Path(os.environ.get('CLIP_FIXTURE_WEBM', str(Path(os.environ['CLIP_FIXTURE_VIDEO']).with_suffix('.webm')))).read_bytes()
+filmstrip = Path(os.environ.get('CLIP_FIXTURE_FILMSTRIP', str(Path(os.environ['CLIP_FIXTURE_VIDEO']).with_suffix('.jpg')))).read_bytes()
 clip_formats = {}
 output = Path(os.environ.get('CLIP_BROWSER_OUTPUT', '/tmp/clip-browser-checks'))
 output.mkdir(parents=True, exist_ok=True)
@@ -62,6 +64,11 @@ class Handler(BaseHTTPRequestHandler):
             if not self.authorize(): return
             assert parse_qs(urlsplit(self.path).query).get('DeviceId') == ['fixture-device']
             self.send(json.dumps([{'DeviceId':'fixture-device','NowPlayingItem':{'Id':item,'Name':'Aspect ratio test','RunTimeTicks':settings['runtime']*10000000},'PlayState':{'PositionTicks':settings['anchor']*10000000,'MediaSourceId':'selected-version','AudioStreamIndex':1,'SubtitleStreamIndex':2}}]))
+        elif path.startswith('/jellyfin/Screenshot/clips/') and path.endswith('/filmstrip'):
+            if not self.authorize(): return
+            if settings.get('fail_filmstrip'):
+                self.send('Thumbnail request failed', 'text/plain', 503); return
+            self.send(filmstrip, 'image/jpeg')
         elif path.startswith('/jellyfin/Screenshot/clips/'):
             if not self.authorize(media=True): return
             media_gate.wait(30)
@@ -104,6 +111,7 @@ url=f'http://127.0.0.1:{server.server_port}/fixture'
 with sync_playwright() as p:
     browser=p.chromium.launch(headless=True,args=['--no-sandbox','--disable-dev-shm-usage'])
     page=browser.new_page(viewport={'width':1440,'height':1050},accept_downloads=True)
+    page.clock.install()
     errors=[];page.on('pageerror',lambda err:errors.append(str(err)))
     page.goto(url)
     # Desktop completion supplies the actual renamed path; starting a download
@@ -127,6 +135,35 @@ with sync_playwright() as p:
     assert page.locator('#screenshot-capture-toast frame').count()==0
     report_screenshot('cancelled') # Duplicate notifications cannot overwrite success.
     assert saved_path in page.locator('#screenshot-capture-toast').inner_text()
+    # Desktop toast interactions must neither pin the toast nor reach player clicks.
+    page.evaluate("""() => {
+        window.toastHostClicks=0;
+        window.countToastHostClick=()=>window.toastHostClicks++;
+        document.addEventListener('click',window.countToastHostClick);
+    }""")
+    page.locator('#screenshot-capture-toast').click(position={'x':12,'y':12})
+    assert page.locator('#screenshot-capture-toast').count()==0
+    assert page.evaluate('window.toastHostClicks')==0
+    page.evaluate('document.removeEventListener("click",window.countToastHostClick)')
+    request_screenshot();report_screenshot('complete', saved_path)
+    page.locator('#screenshot-capture-toast button').focus()
+    page.clock.fast_forward(10_100)
+    assert page.locator('#screenshot-capture-toast').count()==0
+    assert page.locator('#screenshot-capture-btn').evaluate('el=>el===document.activeElement')
+    request_screenshot();report_screenshot('complete', saved_path)
+    page.get_by_role('button',name='Dismiss notification').click()
+    assert page.locator('#screenshot-capture-toast').count()==0
+    request_screenshot();report_screenshot('complete', saved_path)
+    page.locator('#screenshot-capture-toast button').focus();page.keyboard.press('Escape')
+    assert page.locator('#screenshot-capture-toast').count()==0
+    # A retired toast's deadline must not remove its replacement.
+    request_screenshot();report_screenshot('complete', saved_path)
+    page.clock.fast_forward(6000)
+    request_screenshot();report_screenshot('complete', saved_path)
+    page.clock.fast_forward(4100)
+    assert saved_path in page.locator('#screenshot-capture-toast').inner_text()
+    page.clock.fast_forward(6000)
+    assert page.locator('#screenshot-capture-toast').count()==0
     for outcome, message in [('cancelled','save cancelled'),('failed','could not be saved')]:
         request_screenshot();report_screenshot(outcome)
         page.wait_for_function('(message)=>document.querySelector("#screenshot-capture-toast")?.textContent.includes(message)',arg=message)
@@ -156,8 +193,10 @@ with sync_playwright() as p:
         document.addEventListener('click', window.blockAutomaticScreenshot, true);
         document.addEventListener('click', window.interceptHostDownload);
     }""")
+    previous_save_url = page.locator('#screenshot-capture-toast a[download]').get_attribute('href')
     page.locator('#screenshot-capture-btn').click()
     page.locator('[data-capture-mode="without-subtitles"]').click()
+    page.wait_for_function('(previous)=>{const link=document.querySelector("#screenshot-capture-toast a[download]");return link && link.href!==previous;}',arg=previous_save_url)
     save_link = page.locator('#screenshot-capture-toast a[download]')
     save_link.wait_for(state='visible')
     assert 'download started' not in page.locator('#screenshot-capture-toast').inner_text()
@@ -171,14 +210,76 @@ with sync_playwright() as p:
         document.removeEventListener('click', window.blockAutomaticScreenshot, true);
         document.removeEventListener('click', window.interceptHostDownload);
     }""")
+    # Simulate Desktop refusing seeks on a detached helper video. The reel must
+    # still render, and an image retry must not request another expensive preview.
+    page.evaluate("""() => {
+        const descriptor = Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'currentTime');
+        Object.defineProperty(HTMLMediaElement.prototype, 'currentTime', {
+            ...descriptor, set(value) {
+                if (!this.isConnected) throw new Error('Detached video seeking unavailable');
+                descriptor.set.call(this, value);
+            }
+        });
+    }""")
+    settings['fail_filmstrip'] = True
     page.locator('#screenshot-clip-btn').click()
     page.wait_for_function('document.querySelector(".jfc-export")?.disabled===false')
+    page.locator('.jfc-thumbnail-retry').wait_for(state='visible')
+    assert page.locator('.jfc-frames img').count()==0
+    render_count = len(requests)
+    settings['fail_filmstrip'] = False
+    page.locator('.jfc-thumbnail-retry').click()
+    page.wait_for_function('document.querySelectorAll(".jfc-frames img").length===8 && [...document.querySelectorAll(".jfc-frames img")].every(img=>img.complete && img.naturalWidth===160)')
+    assert len(requests)==render_count
+    assert page.locator('.jfc-thumbnail-retry').is_hidden()
+    assert page.locator('.jfc-frames').evaluate('el=>new Set([...el.children].map(img=>img.src)).size')==8
+
     assert requests[-1]['Preview'] and requests[-1]['AnchorTicks']==700000000
     assert requests[-1]['MediaSourceId']=='selected-version' and requests[-1]['AudioStreamIndex']==1
     box=page.locator('.jfc-preview').bounding_box();assert abs(box['width']/box['height']-16/9)<.01
     assert page.locator('[data-clip-preview]').evaluate('el=>getComputedStyle(el).objectFit')=='contain'
     page.wait_for_function('document.querySelectorAll(".jfc-frames img").length===8')
     page.screenshot(path=str(output/'focus-desktop.png'),full_page=True)
+    # Editing the end must show its frame instead of jumping to the start.
+    page.locator('[data-jfc-preset="15,15"]').click()
+    page.locator('.jfc-end').focus();page.keyboard.press('ArrowRight')
+    page.wait_for_function('Math.abs(document.querySelector("[data-clip-preview]").currentTime-76)<.1')
+    assert page.locator('#jfc-start').input_value()=='55'
+    assert page.locator('#jfc-duration').input_value()=='31'
+    handle=page.locator('.jfc-end').bounding_box();track=page.locator('.jfc-timeline').bounding_box()
+    page.mouse.move(handle['x']+7,handle['y']+20);page.mouse.down()
+    page.mouse.move(track['x']+track['width']*.7,track['y']+20,steps=6);page.mouse.up()
+    page.wait_for_function('Math.abs(document.querySelector("[data-clip-preview]").currentTime-84)<.2')
+    end_before=float(page.locator('#jfc-start').input_value())+float(page.locator('#jfc-duration').input_value())
+    page.locator('.jfc-end').hover();page.mouse.wheel(0,-100)
+    page.wait_for_function('(end)=>Math.abs(document.querySelector("[data-clip-preview]").currentTime-(end+1-10))<.2',arg=end_before)
+    page.locator('#jfc-duration').fill('20')
+    page.wait_for_function('Math.abs(document.querySelector("[data-clip-preview]").currentTime-65)<.1')
+    # Setting an endpoint uses the preview position; crossing moves the other edge.
+    def preview_at(absolute):
+        page.evaluate('(t)=>{const v=document.querySelector("[data-clip-preview]");v.pause();v.currentTime=t-10;}',absolute)
+        page.wait_for_function('(t)=>{const v=document.querySelector("[data-clip-preview]");return !v.seeking && Math.abs(v.currentTime-(t-10))<.05;}',arg=absolute)
+    for side,position,start,duration in [
+        ('start',60,60,25), ('end',70,55,15),
+        ('end',30,10,20), ('start',110,110,20),
+        ('end',55,25,30), ('start',85,85,30),
+        ('start',10,10,75), ('end',130,55,75)
+    ]:
+        page.locator('[data-jfc-preset="15,15"]').click();preview_at(position)
+        page.locator(f'[data-jfc-set-position="{side}"]').click()
+        assert float(page.locator('#jfc-start').input_value()) == start
+        assert float(page.locator('#jfc-duration').input_value()) == duration
+        assert abs(page.locator('[data-clip-preview]').evaluate('el=>el.currentTime')-(position-10)) < .05
+        assert not page.locator('.jfc-export').is_disabled()
+    preview_at(10)
+    assert page.locator('[data-jfc-set-position="end"]').is_disabled()
+    preview_at(130)
+    assert page.locator('[data-jfc-set-position="start"]').is_disabled()
+    # A collapsed selection can be recovered without producing a negative duration.
+    page.locator('[data-jfc-preset="15,15"]').click();page.locator('#jfc-duration').fill('0')
+    preview_at(80);page.locator('[data-jfc-set-position="start"]').click()
+    assert page.locator('#jfc-start').input_value()=='80'
+    assert page.locator('#jfc-duration').input_value()=='1'
     page.locator('[data-jfc-preset="60,60"]').click()
     assert page.locator('#jfc-start').input_value()=='10'
     assert page.locator('#jfc-duration').input_value()=='120'
@@ -324,7 +425,6 @@ with sync_playwright() as p:
     settings['fail']=False;page.locator('.jfc-retry').click();page.wait_for_function('document.querySelector(".jfc-export")?.disabled===false');page.keyboard.press('Escape')
     settings['delay']=True;page.locator('#screenshot-clip-btn').click();page.locator('#jfclip-editor').wait_for();page.keyboard.press('Escape');page.wait_for_timeout(1200);assert page.locator('#jfclip-editor').count()==0;settings['delay']=False
     # A silent media request must stop the spinner and offer a retry.
-    page.clock.install()
     media_gate.clear()
     page.locator('#screenshot-clip-btn').click()
     page.wait_for_function('document.querySelector(".jfc-loading-label")?.textContent === "Loading preview video…"')
@@ -364,7 +464,7 @@ with sync_playwright() as p:
     assert not errors,errors
     assert not unauthorized,unauthorized
     assert any(method == 'DELETE' for method, _ in authenticated)
-    (output/'browser-checks.json').write_text(json.dumps({'status':'passed','requests':len(requests),'errors':errors,'checks':['confirmed screenshot path, cancellation, failure and browser fallback','manual screenshot save when automatic downloads are denied','visible idle cursor and reliable pause','selections before and after the fixed moment','stalled render and media timeout with retry','modern authorization with legacy auth disabled','button injection','real preview playback and seeking','real thumbnails','16:9 contain','bounds and zero length','drag and keyboard trimming','reel scrubbing, pointer capture, cancellation and keyboard seeking','fixed anchor','selected source/audio/subtitles','browser download','native download','WebM capability negotiation, real playback and MP4 decode fallback','retry','close during prepare','media boundaries','mobile overflow']},indent=2))
+    (output/'browser-checks.json').write_text(json.dumps({'status':'passed','requests':len(requests),'errors':errors,'checks':['confirmed screenshot path, cancellation, failure and browser fallback','toast click, close, Escape, focus expiry and replacement cleanup','manual screenshot save when automatic downloads are denied','visible idle cursor and reliable pause','selections before and after the fixed moment','stalled render and media timeout with retry','modern authorization with legacy auth disabled','button injection','real preview playback and seeking','complete eight-frame filmstrip without detached video seeking, authenticated image fetch and retry','16:9 contain','bounds and zero length','drag and keyboard trimming','end-frame previews and current-position endpoint actions','reel scrubbing, pointer capture, cancellation and keyboard seeking','fixed anchor','selected source/audio/subtitles','browser download','native download','WebM capability negotiation, real playback and MP4 decode fallback','retry','close during prepare','media boundaries','mobile overflow']},indent=2))
     browser.close()
 server.shutdown()
 print('PASS: production editor, real video playback/thumbnails, trimming, downloads, cancellation, retries, and mobile boundaries')
