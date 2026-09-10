@@ -9,6 +9,22 @@
     "imageUrl": "",
     "versions": [
       {
+        "changelog": "Update readme.",
+        "targetAbi": "12.0.0.0",
+        "version": "3.2.11.18",
+        "sourceUrl": "https://github.com/NekoShinobi/jellyfin-plugin-screenshot/releases/download/2.2.11.18/Jellyfin.Plugin.Screenshot_3.2.11.18.zip",
+        "checksum": "2E28D243591B04DA3547201FBC0B20E7",
+        "timestamp": "2026-09-10T17:49:05Z"
+      },
+      {
+        "changelog": "Update readme.",
+        "targetAbi": "10.11.0.0",
+        "version": "2.2.11.18",
+        "sourceUrl": "https://github.com/NekoShinobi/jellyfin-plugin-screenshot/releases/download/2.2.11.18/Jellyfin.Plugin.Screenshot_2.2.11.18.zip",
+        "checksum": "821C103ABFFD9DA18CE5D51BBEF82679",
+        "timestamp": "2026-09-10T17:49:05Z"
+      },
+      {
         "changelog": "Update github workflows.",
         "targetAbi": "12.0.0.0",
         "version": "3.2.11.17",
