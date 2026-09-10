@@ -4,62 +4,12 @@ Adds a camera button to the Jellyfin video player OSD. On click, choose whether 
 
 ## Video clipping
 
-The scissors button beside Screenshot opens the **Focus** editor and pauses playback.
-The request timestamp fixes a window from 60 seconds before to 60 seconds after
-it (120 seconds total), clamped to the media's start
-and end. Choose a **Starting point** (seconds into the video) and **Duration**, or
-drag either handle anywhere within that window. “Your moment” is a reference marker;
-a selection may sit entirely before or after it. Moving the starting point preserves
-the duration until it reaches the window's end. Drag the timeline handles, enter times, use presets, or trim with arrow keys
-(Shift changes by five seconds; Home/End move to the available limits).
-Click or drag the thumbnail reel to scrub the preview anywhere in the fixed window
-without changing the trim selection. Scrubbing pauses playback and stays paused on
-release. Focus the reel to seek with Left/Right arrows, Shift for five seconds, or
-Home/End for the window boundaries. The bottom-right Position badge shows the
-current source timestamp, and editor controls darken on hover. Dragging, scrolling over, or
-using arrow keys on a trim handle shows that boundary in the preview; changing
-Duration shows the end boundary. Scroll up/down moves a handle one second, or five
-with Shift. **Set start here** and **Set end here** use the current preview position.
-If that position would cross or meet the opposite boundary, the other boundary
-moves to preserve the previous duration, shortened only by the fixed window.
-An empty selection recovers with up to one second. Setting the start at the window
-end or the end at the window start is disabled to avoid an empty clip.
+Click the scissors button to preview and trim a clip within **one minute before or
+after the current playback position**. Drag the timeline handles or enter a starting
+point and duration, then download an MP4 with optional subtitles. The preview fits
+inside a 16:9 box; exports keep the video's original aspect ratio.
 
-The server prepares a preview of the surrounding window at up to
-960×540 and 24 fps, retaining lower source frame rates. Preview frames are resized
-before HDR tone mapping and text subtitle rendering, then encoded with the fastest
-software preset for MP4. Clients without H.264/AAC playback (including some CEF
-builds used by Jellium/Desktop) request VP8/Opus WebM using a realtime encoder.
-The editor checks HTML video codec support before rendering and retries MP4 decode
-failures once with WebM when supported. MP4 exports keep H.264/AAC regardless of
-preview format. Frequent keyframes help seeking. Preview
-compression is less efficient, so files can be larger within the existing bitrate
-limit; export quality and frame rate are unchanged. The complete window still needs
-to render before playback, so preparation time depends on server CPU and source
-decoding speed. The server extracts an eight-frame JPEG filmstrip from the finished
-preview, avoiding a second video decoder and repeated thumbnail seeks on Desktop.
-The whole reel loads together; **Retry thumbnails** retries a failed image request
-without rendering another preview. Filmstrips use the same ownership and current
-library/download permission checks as previews, and are deleted with them.
-It supports real playback and seeking. The **16:9 preview box** fits the
-entire image with black bars as needed. These bars are **never added to the export**.
-MP4 exports retain the source display aspect ratio, use the selected audio track,
-and optionally burn in the selected text or bitmap subtitle track. H.264 requires
-even dimensions; odd dimensions are rounded down by one pixel with display aspect
-ratio preserved. PQ/HLG sources are tone-mapped to SDR. Clips are re-encoded rather
-than copied at keyframe boundaries so trimming can start between keyframes.
-
-Clipping requires a local video with a known duration and a user allowed to play
-and download it. External audio and live/remote streams are unsupported. Clips use
-stereo AAC audio. The main player stays paused after closing the editor.
-
-Preparing/exporting shows a busy state; closing the dialog cancels an in-progress
-request and its FFmpeg process. Failed previews can be retried. Downloads use the
-browser's save flow or Jellyfin Desktop's native download API. Preview files are
-released on close; ready downloads expire after 30 minutes. The server allows two
-renders globally, one per user, with a ten-minute timeout and bounded temporary
-storage under its cache directory. Older completed downloads may be evicted when a
-user creates additional clips. The editor respects existing download permissions.
+See the [clipping guide](docs/clipping.md) for controls, supported media, and preview details.
 
 ## Requirements
 
