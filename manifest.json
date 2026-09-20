@@ -6,7 +6,7 @@
     "overview": "Adds a screenshot button to the video player OSD and captures the current frame with FFmpeg.",
     "owner": "NekoShinobi",
     "category": "General",
-    "imageUrl": "",
+    "imageUrl": "https://raw.githubusercontent.com/NekoShinobi/jellyfin-plugin-screenshot/main/logo.png",
     "versions": [
       {
         "changelog": "feat: Better subtitle rendering using soft subs for the preview, but then hardsubbing it when creating the clip.",
