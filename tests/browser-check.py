@@ -22,6 +22,8 @@ unauthorized = []
 authenticated = []
 render_gate = threading.Event(); render_gate.set()
 media_gate = threading.Event(); media_gate.set()
+subtitle_requests = []
+subtitle_gate = threading.Event(); subtitle_gate.set()
 settings = {'anchor':70,'runtime':200,'fail':False,'delay':False}
 item = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 
@@ -64,6 +66,15 @@ class Handler(BaseHTTPRequestHandler):
             if not self.authorize(): return
             assert parse_qs(urlsplit(self.path).query).get('DeviceId') == ['fixture-device']
             self.send(json.dumps([{'DeviceId':'fixture-device','NowPlayingItem':{'Id':item,'Name':'Aspect ratio test','RunTimeTicks':settings['runtime']*10000000},'PlayState':{'PositionTicks':settings['anchor']*10000000,'MediaSourceId':'selected-version','AudioStreamIndex':1,'SubtitleStreamIndex':2}}]))
+        elif path.startswith('/jellyfin/Screenshot/clips/') and '/subtitles/' in path:
+            if not self.authorize(): return
+            subtitle_requests.append(path)
+            subtitle_gate.wait(30)
+            if settings.get('bitmap_subtitles'):
+                self.send('Bitmap subtitles require a rendered preview.', 'text/plain', 422); return
+            if settings.get('fail_subtitles'):
+                self.send('Subtitles unavailable', 'text/plain', 503); return
+            self.send('WEBVTT\n\n00:00:00.000 --> 00:00:05.000\nOUTSIDE\n\n00:00:09.000 --> 00:00:11.000\nCROSSING START\n\n00:00:55.000 --> 00:01:05.000\n<b>SELECTED SUBTITLE</b>\n\n00:02:09.000 --> 00:02:11.000\nCROSSING END\n', 'text/vtt')
         elif path.startswith('/jellyfin/Screenshot/clips/') and path.endswith('/filmstrip'):
             if not self.authorize(): return
             if settings.get('fail_filmstrip'):
@@ -348,10 +359,32 @@ with sync_playwright() as p:
         page.wait_for_function('!document.querySelector("[data-clip-preview]").paused')
         page.locator('.jfc-play').click()
         page.wait_for_function('document.querySelector("[data-clip-preview]").paused')
-    page.locator('#jfc-subtitles').check();page.wait_for_function('document.querySelector(".jfc-export")?.disabled===false')
-    assert requests[-1]['SubtitleStreamIndex']==2
+    # Text subtitles use a separate authenticated track without another video POST,
+    # seek, source change, or filmstrip render. Toggle repeatedly using cached cues.
+    preview_at(60)
+    before_subtitles = len(requests)
+    source_before = page.locator('[data-clip-preview]').get_attribute('src')
+    assert page.locator('.jfc-subs').evaluate('el=>getComputedStyle(el).cursor') == 'pointer'
+    assert page.locator('#jfc-subtitles').evaluate('el=>getComputedStyle(el).cursor') == 'pointer'
+    page.locator('#jfc-subtitles').check()
+    page.wait_for_function('document.querySelector("video[data-clip-preview] track")?.track.mode === "showing"')
+    assert len(requests) == before_subtitles
+    assert requests[-1]['SubtitleStreamIndex'] is None
+    assert len(subtitle_requests) == 1 and subtitle_requests[-1].endswith('/subtitles/2')
+    assert page.locator('[data-clip-preview]').get_attribute('src') == source_before
+    assert abs(page.locator('[data-clip-preview]').evaluate('el=>el.currentTime') - 50) < .05
+    cues = page.locator('video[data-clip-preview] track').evaluate('el=>Array.from(el.track.cues, c=>[c.startTime,c.endTime,c.text])')
+    assert cues == [[0,1,'CROSSING START'],[45,55,'<b>SELECTED SUBTITLE</b>'],[119,120,'CROSSING END']]
+    page.wait_for_function('document.querySelector("video[data-clip-preview] track").track.activeCues?.[0]?.text.includes("SELECTED SUBTITLE")')
+    for _ in range(3):
+        page.locator('#jfc-subtitles').uncheck()
+        assert page.locator('video[data-clip-preview] track').evaluate('el=>el.track.mode') == 'disabled'
+        page.locator('#jfc-subtitles').check()
+        assert page.locator('video[data-clip-preview] track').evaluate('el=>el.track.mode') == 'showing'
+    assert len(requests) == before_subtitles and len(subtitle_requests) == 1
     with page.expect_download() as download:page.locator('.jfc-export').click()
     assert download.value.suggested_filename=='test-clip.mp4'
+    assert requests[-1]['SubtitleStreamIndex'] == 2
     assert not requests[-1]['Preview'] and requests[-1]['StartTicks']==550000000 and requests[-1]['EndTicks']==850000000
     assert requests[-1]['AnchorTicks']==700000000
     # Move the end handle before the moment, and export a selection wholly before it.
@@ -377,6 +410,45 @@ with sync_playwright() as p:
     page.locator('[data-jfc-preset="15,15"]').click()
     page.locator('.jfc-close').click();assert page.locator('#jfclip-editor').count()==0
     assert page.locator('#screenshot-clip-btn').evaluate('el=>el===document.activeElement')
+    # Failed extraction can be retried without rebuilding the video.
+    page.locator('#screenshot-clip-btn').click()
+    page.wait_for_function('document.querySelector(".jfc-export")?.disabled===false')
+    count = len(requests)
+    settings['fail_subtitles'] = True
+    page.locator('#jfc-subtitles').check()
+    page.wait_for_function('document.querySelector(".jfc-status").classList.contains("jfc-error")')
+    assert not page.locator('#jfc-subtitles').is_checked()
+    assert page.locator('video[data-clip-preview] track').count() == 0
+    settings['fail_subtitles'] = False
+    page.locator('#jfc-subtitles').check()
+    page.wait_for_function('document.querySelector("video[data-clip-preview] track")?.track.mode === "showing"')
+    assert len(requests) == count
+    page.keyboard.press('Escape')
+    # Abort extraction when toggled off or closed, with no late track attachment.
+    page.locator('#screenshot-clip-btn').click()
+    page.wait_for_function('document.querySelector(".jfc-export")?.disabled===false')
+    subtitle_gate.clear()
+    page.locator('#jfc-subtitles').check()
+    assert page.locator('.jfc-export').is_disabled()
+    page.locator('#jfc-subtitles').uncheck()
+    assert not page.locator('.jfc-export').is_disabled()
+    page.locator('#jfc-subtitles').check()
+    page.keyboard.press('Escape')
+    subtitle_gate.set()
+    assert page.locator('#jfclip-editor').count() == 0
+    # Bitmap subtitles preserve the existing burn-in preview fallback.
+    settings['bitmap_subtitles'] = True
+    page.locator('#screenshot-clip-btn').click()
+    page.wait_for_function('document.querySelector(".jfc-export")?.disabled===false')
+    count = len(requests)
+    page.locator('#jfc-subtitles').check()
+    page.wait_for_function('document.querySelector(".jfc-status")?.textContent.includes("Image-based subtitles")')
+    assert len(requests) == count + 1 and requests[-1]['SubtitleStreamIndex'] == 2
+    page.locator('#jfc-subtitles').uncheck()
+    page.wait_for_function('document.querySelector(".jfc-export")?.disabled===false')
+    assert len(requests) == count + 2 and requests[-1]['SubtitleStreamIndex'] is None
+    page.keyboard.press('Escape')
+    settings['bitmap_subtitles'] = False
     # Model a CEF build with no MP4 codecs, while playing actual WebM media.
     page.evaluate("""() => {
         window.originalCanPlayType = HTMLMediaElement.prototype.canPlayType;
@@ -464,7 +536,7 @@ with sync_playwright() as p:
     assert not errors,errors
     assert not unauthorized,unauthorized
     assert any(method == 'DELETE' for method, _ in authenticated)
-    (output/'browser-checks.json').write_text(json.dumps({'status':'passed','requests':len(requests),'errors':errors,'checks':['confirmed screenshot path, cancellation, failure and browser fallback','toast click, close, Escape, focus expiry and replacement cleanup','manual screenshot save when automatic downloads are denied','visible idle cursor and reliable pause','selections before and after the fixed moment','stalled render and media timeout with retry','modern authorization with legacy auth disabled','button injection','real preview playback and seeking','complete eight-frame filmstrip without detached video seeking, authenticated image fetch and retry','16:9 contain','bounds and zero length','drag and keyboard trimming','end-frame previews and current-position endpoint actions','reel scrubbing, pointer capture, cancellation and keyboard seeking','fixed anchor','selected source/audio/subtitles','browser download','native download','WebM capability negotiation, real playback and MP4 decode fallback','retry','close during prepare','media boundaries','mobile overflow']},indent=2))
+    (output/'browser-checks.json').write_text(json.dumps({'status':'passed','requests':len(requests),'errors':errors,'checks':['confirmed screenshot path, cancellation, failure and browser fallback','toast click, close, Escape, focus expiry and replacement cleanup','manual screenshot save when automatic downloads are denied','visible idle cursor and reliable pause','selections before and after the fixed moment','stalled render and media timeout with retry','modern authorization with legacy auth disabled','button injection','real preview playback and seeking','complete eight-frame filmstrip without detached video seeking, authenticated image fetch and retry','16:9 contain','bounds and zero length','drag and keyboard trimming','end-frame previews and current-position endpoint actions','reel scrubbing, pointer capture, cancellation and keyboard seeking','fixed anchor','selected source/audio/subtitles','soft preview cue timing, cached toggles, cancellation, retry and bitmap fallback; selected subtitles retained for hardsub exports','browser download','native download','WebM capability negotiation, real playback and MP4 decode fallback','retry','close during prepare','media boundaries','mobile overflow']},indent=2))
     browser.close()
 server.shutdown()
 print('PASS: production editor, real video playback/thumbnails, trimming, downloads, cancellation, retries, and mobile boundaries')

@@ -37,7 +37,8 @@ disabled at edges that would leave an empty clip.
 
 - **Preview:** up to 960×540 at 24 fps, retaining lower source frame rates. The 16:9 preview box fits the whole image with black bars where needed.
 - **Export:** MP4 with H.264 video and stereo AAC audio, using the selected audio track. Exports keep the source display aspect ratio and frame rate; preview black bars are not added to the file.
-- **Subtitles and HDR:** selected text or bitmap subtitles can be burned in. PQ/HLG video is tone-mapped to SDR.
+- **Subtitles:** text subtitles load separately in the preview and toggle without rendering the video again. Preview text uses browser styling, so advanced ASS formatting may differ. Image-based subtitles (such as PGS/VobSub) use a burned-in preview and still require rendering when toggled. Downloads always burn selected subtitles into the video.
+- **HDR:** PQ/HLG video is tone-mapped to SDR.
 - **Precision:** clips are re-encoded so trims can fall between source keyframes. H.264 requires even dimensions; odd dimensions are rounded down by one pixel while preserving display aspect ratio.
 
 The preview uses H.264/AAC MP4 when supported. Clients without those codecs,

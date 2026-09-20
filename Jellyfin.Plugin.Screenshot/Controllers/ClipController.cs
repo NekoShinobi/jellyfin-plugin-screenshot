@@ -2,6 +2,7 @@ using Jellyfin.Plugin.Screenshot.Model;
 using Jellyfin.Plugin.Screenshot.Services;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
+using MediaBrowser.Model.Entities;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
@@ -116,6 +117,47 @@ public sealed class ClipController : ControllerBase
             return new FileStreamResult(stream, "image/jpeg");
         }
         catch (FileNotFoundException) { return NotFound("The preview has expired."); }
+    }
+
+    /// <summary>Returns text subtitles for a preview using original source timestamps.</summary>
+    [HttpGet("{id:guid}/subtitles/{index:int}")]
+    public async Task<ActionResult> Subtitles(Guid id, int index, CancellationToken cancellationToken)
+    {
+        var clip = _clips.Find(id, UserId);
+        if (clip is null || !clip.Preview) return NotFound("The preview has expired or is unavailable.");
+        var item = AccessibleVideo(clip.ItemId);
+        if (item is null || AccessibleVideo(clip.SourceItemId) is null) return NotFound("The preview is unavailable.");
+        var user = _users.GetUserById(UserId)!;
+        var source = _sources.GetStaticMediaSources(item, false, user)
+            .FirstOrDefault(s => string.Equals(s.Id, clip.MediaSourceId, StringComparison.OrdinalIgnoreCase));
+        if (source is null || MediaCaptureAccess.SourceVideo(_library, item, source, user)?.Id != clip.SourceItemId)
+            return NotFound("The selected media source is unavailable.");
+        var subtitle = source.MediaStreams.FirstOrDefault(s => s.Type == MediaStreamType.Subtitle && s.Index == index);
+        if (subtitle is null) return BadRequest("The selected subtitle track is unavailable.");
+        if (!subtitle.IsTextSubtitleStream) return UnprocessableEntity("Bitmap subtitles require a rendered preview.");
+        try
+        {
+            var stream = await _clips.PreviewSubtitlesAsync(UserId, item, source, index, cancellationToken).ConfigureAwait(false);
+            if (_clips.Find(id, UserId) is null || AccessibleVideo(clip.ItemId) is null || AccessibleVideo(clip.SourceItemId) is null)
+            {
+                await stream.DisposeAsync().ConfigureAwait(false);
+                return NotFound("The preview has expired or is unavailable.");
+            }
+            Response.Headers.CacheControl = "private, no-store";
+            return new FileStreamResult(stream, "text/vtt; charset=utf-8");
+        }
+        catch (ClipBusyException)
+        {
+            Response.Headers.RetryAfter = "5";
+            return StatusCode(429, "Subtitle preparation is busy. Try again shortly.");
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { return StatusCode(499); }
+        catch (OperationCanceledException) { return StatusCode(504, "Subtitle preparation timed out."); }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Could not prepare subtitles for clip {ClipId}", id);
+            return StatusCode(500, "The preview subtitles could not be loaded. Try again or check the Jellyfin server log.");
+        }
     }
 
     /// <summary>Releases a prepared preview or download belonging to this user.</summary>

@@ -9,7 +9,7 @@ using Microsoft.Extensions.Logging;
 
 namespace Jellyfin.Plugin.Screenshot.Services;
 
-internal sealed record StoredClip(Guid Id, Guid UserId, Guid ItemId, string Path, string Filename, ClipRange Range, bool Preview, DateTime Expires, Guid SourceItemId)
+internal sealed record StoredClip(Guid Id, Guid UserId, Guid ItemId, string Path, string Filename, ClipRange Range, bool Preview, DateTime Expires, Guid SourceItemId, string MediaSourceId)
 {
     public string FilmstripPath => Path + ".jpg";
     public string ContentType => System.IO.Path.GetExtension(Path) == ".webm" ? "video/webm" : "video/mp4";
@@ -109,7 +109,7 @@ public sealed class ClipService : IDisposable
             if (safeName.Length > 100) safeName = safeName[..100];
             if (safeName.Length == 0) safeName = "Clip";
             var filename = $"{safeName}-{TimeSpan.FromTicks(range.StartTicks).ToString(@"hh\-mm\-ss")}-{TimeSpan.FromTicks(range.EndTicks).ToString(@"hh\-mm\-ss")}.{extension}";
-            var clip = new StoredClip(id, userId, item.Id, output, filename, range, request.Preview, DateTime.UtcNow.AddMinutes(30), sourceItemId == Guid.Empty ? item.Id : sourceItemId);
+            var clip = new StoredClip(id, userId, item.Id, output, filename, range, request.Preview, DateTime.UtcNow.AddMinutes(30), sourceItemId == Guid.Empty ? item.Id : sourceItemId, source.Id);
             lock (_gate)
             {
                 timeout.Token.ThrowIfCancellationRequested();
@@ -126,6 +126,24 @@ public sealed class ClipService : IDisposable
             if (!retained) { DeleteFile(output); DeleteFile(output + ".jpg"); }
             lock (_gate) _active.Remove(userId);
         }
+    }
+
+    // Share the render quota so repeated subtitle extraction cannot bypass it.
+    internal async Task<Stream> PreviewSubtitlesAsync(Guid userId, Video item, MediaSourceInfo source, int index, CancellationToken token)
+    {
+        lock (_gate)
+        {
+            if (_active.Count >= 2 || !_active.Add(userId)) throw new ClipBusyException();
+        }
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(token, _shutdown.Token);
+        timeout.CancelAfter(TimeSpan.FromMinutes(10));
+        try
+        {
+            // Ask for original timestamps even for native VTT sources (Jellyfin can
+            // return those unchanged). The browser clips and rebases parsed cues.
+            return await _subtitles.GetSubtitles(item, source.Id, index, "vtt", 0, 0, true, timeout.Token).ConfigureAwait(false);
+        }
+        finally { lock (_gate) _active.Remove(userId); }
     }
 
     internal StoredClip? Find(Guid id, Guid userId)

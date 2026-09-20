@@ -3,6 +3,9 @@
 /* Override Jellyfin/desktop idle cursor hiding only while the editor is open. */
 body.jfc-open #jfclip-editor,body.jfc-open #jfclip-editor *{cursor:auto!important}body.jfc-open #jfclip-editor button,body.jfc-open #jfclip-editor button *{cursor:pointer!important}body.jfc-open #jfclip-editor button:disabled{cursor:not-allowed!important}body.jfc-open #jfclip-editor input{cursor:text!important}body.jfc-open #jfclip-editor .jfc-handle{cursor:ew-resize!important}#jfclip-editor::backdrop{cursor:auto!important}
 
+body.jfc-open #jfclip-editor .jfc-subs,body.jfc-open #jfclip-editor .jfc-subs input{cursor:pointer!important}
+body.jfc-open #jfclip-editor .jfc-subs:has(input:disabled),body.jfc-open #jfclip-editor .jfc-subs input:disabled{cursor:not-allowed!important}
+
 /* Player buttons use Jellyfin's native paper-icon-button-light styles. */
 /* Screenshot menu shares the Focus editor's charcoal surfaces and cyan accent. */
 [data-screenshot-capture-backdrop] {position:fixed;inset:0;z-index:100000;background:#03080cc7;backdrop-filter:blur(6px);}

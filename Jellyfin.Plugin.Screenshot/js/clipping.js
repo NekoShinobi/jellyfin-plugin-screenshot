@@ -62,7 +62,7 @@
                     StartTicks: Math.round((preview ? state.windowStart : state.start) * TICKS),
                     EndTicks: Math.round((preview ? state.windowEnd : state.end) * TICKS),
                     AudioStreamIndex: context.audioStreamIndex,
-                    SubtitleStreamIndex: state.$('#jfc-subtitles').checked ? context.subtitleStreamIndex : null,
+                    SubtitleStreamIndex: state.$('#jfc-subtitles').checked && (!preview || state.bitmapSubtitles) ? context.subtitleStreamIndex : null,
                     Preview: preview, PreviewFormat: preview ? state.previewFormat : 'mp4'
                 })
             });
@@ -114,7 +114,7 @@
         $('.jfc-end-time').textContent = `Ends at ${time(state.end)}`;
         $('.jfc-duration').textContent = `${short(duration)} selected`;
         $('.jfc-export-label').textContent = state.exporting ? 'Creating clip…' : `Create ${short(duration)} clip`;
-        $('.jfc-export').disabled = !state.ready || state.busy || duration <= 0;
+        $('.jfc-export').disabled = !state.ready || state.busy || !!state.subtitleRequest || duration <= 0;
         $('.jfc-play').disabled = !state.ready || state.busy || duration <= 0;
         $('.jfc-controls').disabled = state.busy || !state.ready;
         $('#jfc-subtitles').disabled = state.busy || !(Number.isInteger(state.context.subtitleStreamIndex) && state.context.subtitleStreamIndex >= 0);
@@ -266,7 +266,93 @@
         }
     }
 
+    function clearSubtitles(state) {
+        state.subtitleRequest?.abort();
+        state.subtitleRequest = null;
+        if (state.subtitleTrack) {
+            state.subtitleTrack.track.mode = 'disabled';
+            state.subtitleTrack.remove();
+            state.subtitleTrack = null;
+        }
+        if (state.subtitleUrl) URL.revokeObjectURL(state.subtitleUrl);
+        state.subtitleUrl = null;
+    }
+
+    async function toggleSubtitles(state) {
+        if (!state.ready || state.busy || !state.preview) return;
+        if (state.bitmapSubtitles) { prepare(state); return; }
+        const checkbox = state.$('#jfc-subtitles');
+        if (!checkbox.checked) {
+            if (state.subtitleRequest) clearSubtitles(state);
+            else if (state.subtitleTrack) state.subtitleTrack.track.mode = 'disabled';
+            status(state, ''); update(state);
+            return;
+        }
+        if (state.subtitleTrack) { state.subtitleTrack.track.mode = 'showing'; return; }
+        const preview = state.preview;
+        const request = new AbortController();
+        state.subtitleRequest = request;
+        const timer = setTimeout(() => request.abort(), RENDER_TIMEOUT);
+        status(state, 'Loading selected subtitles…'); update(state);
+        try {
+            const response = await fetch(`${state.context.server}/Screenshot/clips/${encodeURIComponent(preview.id)}/subtitles/${state.context.subtitleStreamIndex}`, {
+                headers: state.context.authorizationHeaders, signal: request.signal
+            });
+            if (current !== state || state.preview !== preview || request.signal.aborted) return;
+            if (response.status === 422) {
+                // Image subtitles cannot use browser text tracks. Preserve burn-in support.
+                state.bitmapSubtitles = true;
+                prepare(state);
+                return;
+            }
+            if (!response.ok) throw new Error('Could not load preview subtitles. Toggle them on again to retry.');
+            const blob = await response.blob();
+            if (current !== state || state.preview !== preview || request.signal.aborted) return;
+            const track = document.createElement('track');
+            track.kind = 'subtitles'; track.label = 'Selected subtitles';
+            state.subtitleUrl = URL.createObjectURL(new Blob([blob], { type: 'text/vtt' }));
+            state.subtitleTrack = track;
+            await new Promise((resolve, reject) => {
+                const abort = () => finish(new Error('Subtitle loading was cancelled or timed out. Toggle them on again to retry.'));
+                const loadTimer = setTimeout(abort, MEDIA_TIMEOUT);
+                function finish(error) {
+                    clearTimeout(loadTimer);
+                    track.onload = track.onerror = null;
+                    request.signal.removeEventListener('abort', abort);
+                    if (error) reject(error); else resolve();
+                }
+                track.onload = () => finish();
+                track.onerror = () => finish(new Error('This client could not read the preview subtitles. Toggle them on again to retry.'));
+                request.signal.addEventListener('abort', abort, { once: true });
+                track.src = state.subtitleUrl;
+                state.video.append(track);
+                track.track.mode = 'hidden';
+            });
+            if (current !== state || state.preview !== preview || request.signal.aborted) return;
+            // Native parsing retains cue markup/settings. Clamp crossing cues, discard
+            // cues outside the frozen window, and shift source time to preview time.
+            for (const cue of Array.from(track.track.cues || [])) {
+                const start = Math.max(preview.start, cue.startTime);
+                const end = Math.min(preview.end, cue.endTime);
+                if (end <= start) track.track.removeCue(cue);
+                else { cue.startTime = start - preview.start; cue.endTime = end - preview.start; }
+            }
+            track.track.mode = checkbox.checked ? 'showing' : 'disabled';
+            status(state, '');
+        } catch (error) {
+            if (current !== state || state.preview !== preview || state.subtitleRequest !== request) return;
+            clearSubtitles(state);
+            checkbox.checked = false;
+            status(state, error.name === 'AbortError' ? 'Subtitle loading timed out. Toggle them on again to retry.' : error.message, true);
+        } finally {
+            clearTimeout(timer);
+            if (state.subtitleRequest === request) state.subtitleRequest = null;
+            if (current === state) update(state);
+        }
+    }
+
     async function prepare(state) {
+        clearSubtitles(state);
         state.request?.abort();
         state.thumbnailRequest?.abort();
         state.$('.jfc-frames').replaceChildren();
@@ -327,7 +413,7 @@
     }
 
     async function exportClip(state) {
-        if (state.busy || !state.ready || state.end <= state.start) return;
+        if (state.busy || state.subtitleRequest || !state.ready || state.end <= state.start) return;
         state.video.pause(); state.busy = true; state.exporting = true;
         status(state, 'Creating your clip… You can cancel by closing the editor.');
         update(state);
@@ -359,6 +445,7 @@
         current = null;
         if (!state) return;
         clearPreparationTimers(state);
+        clearSubtitles(state);
         state.request?.abort();
         state.video.pause(); state.video.removeAttribute('src'); state.video.load();
         state.thumbnailRequest?.abort();
@@ -421,7 +508,7 @@
             }
             state.$('.jfc-retry').onclick = () => prepare(state);
             state.$('.jfc-thumbnail-retry').onclick = () => { if (state.preview) thumbnails(state, state.preview); };
-            state.$('#jfc-subtitles').onchange = () => prepare(state);
+            state.$('#jfc-subtitles').onchange = () => toggleSubtitles(state);
             state.$('.jfc-export').onclick = () => exportClip(state);
             state.$('.jfc-play').onclick = async () => {
                 if (!state.ready || state.busy) return;
@@ -438,7 +525,9 @@
                 if (current !== state || !state.preview) return;
                 clearPreparationTimers(state);
                 state.busy = false; state.ready = true; state.$('.jfc-loading').hidden = true;
-                status(state, ''); update(state, true); thumbnails(state, state.preview);
+                status(state, state.bitmapSubtitles && state.$('#jfc-subtitles').checked ? 'Image-based subtitles are burned into this preview; toggling them requires rendering.' : '');
+                update(state, true); thumbnails(state, state.preview);
+                if (!state.bitmapSubtitles && state.$('#jfc-subtitles').checked) toggleSubtitles(state);
             });
             state.video.addEventListener('error', () => {
                 if (current !== state || !state.preview) return;

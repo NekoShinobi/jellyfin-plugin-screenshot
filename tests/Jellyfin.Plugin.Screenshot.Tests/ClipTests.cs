@@ -111,6 +111,7 @@ public sealed class ClipTests
         { ControllerContext = new ControllerContext { HttpContext = new DefaultHttpContext() } };
         Assert.IsType<NotFoundObjectResult>(await controller.Create(new ClipRequest(), CancellationToken.None));
         Assert.IsType<NotFoundObjectResult>(controller.Get(Guid.NewGuid()));
+        Assert.IsType<NotFoundObjectResult>(await controller.Subtitles(Guid.NewGuid(), 2, CancellationToken.None));
         Assert.Null(service.Find(Guid.NewGuid(), Guid.NewGuid()));
         service.Dispose();
         Directory.Delete(root, true);
@@ -207,7 +208,8 @@ public sealed class ClipTests
             // Exercise actual service ownership, streaming, cleanup and revoked access.
             var paths = new Mock<IApplicationPaths>(); paths.SetupGet(p => p.CachePath).Returns(root);
             var encoder = new Mock<IMediaEncoder>(); encoder.SetupGet(e => e.EncoderPath).Returns(ffmpeg);
-            using var clips = new ClipService(paths.Object, encoder.Object, Mock.Of<ISubtitleEncoder>(), NullLogger<ClipService>.Instance);
+            var subtitles = new Mock<ISubtitleEncoder>();
+            using var clips = new ClipService(paths.Object, encoder.Object, subtitles.Object, NullLogger<ClipService>.Instance);
             var owner = new User("owner", "auth", "reset");
             owner.Permissions.Add(new Permission(PermissionKind.EnableMediaPlayback, true));
             owner.Permissions.Add(new Permission(PermissionKind.EnableContentDownloading, true));
@@ -215,7 +217,7 @@ public sealed class ClipTests
             item.Object.Id = Guid.NewGuid(); item.Object.Name = "Test video"; item.Object.Path = input; item.Object.RunTimeTicks = 8 * Second;
             item.Setup(v => v.IsVisibleStandalone(owner)).Returns(true);
             item.Setup(v => v.IsAuthorizedToDownload(owner)).Returns(true);
-            var source = new MediaSourceInfo { Id = "source", Path = input, RunTimeTicks = 8 * Second, MediaStreams = new[] { new MediaStream { Type = MediaStreamType.Video, Index = 0 }, new MediaStream { Type = MediaStreamType.Audio, Index = 1 } } };
+            var source = new MediaSourceInfo { Id = "source", Path = input, RunTimeTicks = 8 * Second, MediaStreams = new[] { new MediaStream { Type = MediaStreamType.Video, Index = 0 }, new MediaStream { Type = MediaStreamType.Audio, Index = 1 }, new MediaStream { Type = MediaStreamType.Subtitle, Index = 2, Codec = "subrip" }, new MediaStream { Type = MediaStreamType.Subtitle, Index = 3, Codec = "hdmv_pgs_subtitle" } } };
             var library = new Mock<ILibraryManager>(); library.Setup(l => l.GetItemById<Video>(item.Object.Id)).Returns(item.Object);
             var users = new Mock<IUserManager>(); users.Setup(u => u.GetUserById(owner.Id)).Returns(owner);
             var sources = new Mock<IMediaSourceManager>(); sources.Setup(m => m.GetStaticMediaSources(item.Object, false, owner)).Returns(new[] { source });
@@ -236,6 +238,24 @@ public sealed class ClipTests
             Assert.Equal("private, no-store", controller.Response.Headers.CacheControl.ToString());
             Assert.True(filmstrip.FileStream.Length > 0);
             await filmstrip.FileStream.DisposeAsync();
+            // A text track is served separately with original timestamps, including
+            // native VTT which Jellyfin may pass through without rebasing.
+            const string vtt = "WEBVTT\n\n00:00:02.200 --> 00:00:03.000\nSUBTITLE\n";
+            subtitles.Setup(s => s.GetSubtitles(item.Object, source.Id, 2, "vtt", 0, 0, true, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(() => new MemoryStream(System.Text.Encoding.UTF8.GetBytes(vtt)));
+            var subtitleFile = Assert.IsType<FileStreamResult>(await controller.Subtitles(id, 2, CancellationToken.None));
+            Assert.Equal("text/vtt; charset=utf-8", subtitleFile.ContentType);
+            using (var reader = new StreamReader(subtitleFile.FileStream)) Assert.Equal(vtt, await reader.ReadToEndAsync());
+            Assert.Equal(source.Id, stored.MediaSourceId);
+            Assert.IsType<BadRequestObjectResult>(await controller.Subtitles(id, 99, CancellationToken.None));
+            Assert.IsType<UnprocessableEntityObjectResult>(await controller.Subtitles(id, 3, CancellationToken.None));
+            // Revocation during extraction disposes the returned stream and denies it.
+            var revokedStream = new MemoryStream(System.Text.Encoding.UTF8.GetBytes(vtt));
+            subtitles.Setup(s => s.GetSubtitles(item.Object, source.Id, 2, "vtt", 0, 0, true, It.IsAny<CancellationToken>()))
+                .ReturnsAsync(() => { item.Setup(v => v.IsVisibleStandalone(owner)).Returns(false); return revokedStream; });
+            Assert.IsType<NotFoundObjectResult>(await controller.Subtitles(id, 2, CancellationToken.None));
+            Assert.False(revokedStream.CanRead);
+            item.Setup(v => v.IsVisibleStandalone(owner)).Returns(true);
             request.PreviewFormat = "webm";
             var webmCreated = Assert.IsType<OkObjectResult>(await controller.Create(request, CancellationToken.None));
             var webmId = JsonSerializer.SerializeToElement(webmCreated.Value).GetProperty("Id").GetGuid();
@@ -273,6 +293,7 @@ public sealed class ClipTests
             alternate.Setup(v => v.IsVisibleStandalone(owner)).Returns(false);
             Assert.IsType<NotFoundObjectResult>(controller.Get(alternateId));
             Assert.IsType<NotFoundObjectResult>(controller.Filmstrip(alternateId));
+            Assert.IsType<NotFoundObjectResult>(await controller.Subtitles(alternateId, 2, CancellationToken.None));
             clips.Remove(alternateId, owner.Id);
             request.MediaSourceId = source.Id;
             sources.Setup(m => m.GetStaticMediaSources(item.Object, false, owner)).Returns(new[] { source });
@@ -288,6 +309,7 @@ public sealed class ClipTests
                 var selectedClip = Assert.IsType<StoredClip>(clips.Find(selectedId, owner.Id));
                 Assert.Equal(selection, selectedClip.Range);
                 Assert.IsType<NotFoundObjectResult>(controller.Filmstrip(selectedId));
+                Assert.IsType<NotFoundObjectResult>(await controller.Subtitles(selectedId, 2, CancellationToken.None));
                 Assert.False(File.Exists(selectedClip.FilmstripPath));
                 Assert.EndsWith(".mp4", selectedClip.Filename);
                 Assert.Equal("video/mp4", selectedClip.ContentType);
@@ -306,6 +328,7 @@ public sealed class ClipTests
             // Previously generated clips are also denied when library visibility changes.
             Assert.IsType<NotFoundObjectResult>(controller.Get(id));
             Assert.IsType<NotFoundObjectResult>(controller.Filmstrip(id));
+            Assert.IsType<NotFoundObjectResult>(await controller.Subtitles(id, 2, CancellationToken.None));
             item.Setup(v => v.IsVisibleStandalone(owner)).Returns(true);
             encoder.SetupGet(e => e.EncoderPath).Returns(ffmpeg);
 
@@ -315,6 +338,7 @@ public sealed class ClipTests
             controller.HttpContext.User = new ClaimsPrincipal(new ClaimsIdentity(new[] { new Claim("Jellyfin-UserId", otherUser.Id.ToString()) }, "test"));
             Assert.IsType<NotFoundObjectResult>(controller.Get(id));
             Assert.IsType<NotFoundObjectResult>(controller.Filmstrip(id));
+            Assert.IsType<NotFoundObjectResult>(await controller.Subtitles(id, 2, CancellationToken.None));
             Assert.IsType<NoContentResult>(controller.Delete(id));
             Assert.True(File.Exists(stored.Path));
             controller.HttpContext.User = new ClaimsPrincipal(new ClaimsIdentity(new[] { new Claim("Jellyfin-UserId", owner.Id.ToString()) }, "test"));
@@ -322,6 +346,7 @@ public sealed class ClipTests
             item.Setup(v => v.IsAuthorizedToDownload(owner)).Returns(false);
             Assert.IsType<NotFoundObjectResult>(controller.Get(id));
             Assert.IsType<NotFoundObjectResult>(controller.Filmstrip(id));
+            Assert.IsType<NotFoundObjectResult>(await controller.Subtitles(id, 2, CancellationToken.None));
             Assert.IsType<NotFoundObjectResult>(await controller.Create(request, CancellationToken.None));
             clips.Remove(id, owner.Id);
             Assert.False(File.Exists(stored.Path));
