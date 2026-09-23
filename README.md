@@ -11,6 +11,17 @@ inside a 16:9 box; exports keep the video's original aspect ratio.
 
 See the [clipping guide](docs/clipping.md) for controls, supported media, and preview details.
 
+## Translations
+
+The player buttons, screenshot menu, and clip editor follow Jellyfin's display language
+and fall back to English. Included: English, Deutsch, Español, Français, Italiano,
+Português (Brasil), 日本語, and 简体中文.
+
+To add a language, copy `Jellyfin.Plugin.Screenshot/js/locales/en.json` to
+`<code>.json` (for example `nl.json` or `pt-PT.json`) and translate the values. Keep
+`{placeholders}` unchanged; the tests check that every key and placeholder matches English.
+Messages returned by the server are not translated yet.
+
 ## Requirements
 
 - Jellyfin 10.11.x or 12.x (install the matching build below)

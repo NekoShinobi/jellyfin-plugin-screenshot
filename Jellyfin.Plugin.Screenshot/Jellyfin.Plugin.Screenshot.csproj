@@ -28,6 +28,8 @@
     <EmbeddedResource Include="js\screenshot.js" />
     <EmbeddedResource Include="js\clipping.js" />
     <EmbeddedResource Include="js\clipping.css" />
+    <EmbeddedResource Include="js\i18n.js" />
+    <EmbeddedResource Include="js\locales\*.json" />
   </ItemGroup>
 
   <ItemGroup>

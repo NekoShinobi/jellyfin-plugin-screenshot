@@ -5,6 +5,7 @@
     const TICKS = 10_000_000;
     const RENDER_TIMEOUT = 610_000; // Allow the server's ten-minute render timeout to respond.
     const MEDIA_TIMEOUT = 30_000;
+    const { t, html, number } = window.ScreenshotCaptureI18n;
     let current = null;
     let generation = 0;
     let opening = false;
@@ -14,7 +15,7 @@
         const hours = Math.floor(seconds / 3600);
         return (hours ? `${hours}:` : '') + `${String(Math.floor(seconds / 60) % 60).padStart(hours ? 2 : 1, '0')}:${String(seconds % 60).padStart(2, '0')}`;
     };
-    const short = seconds => `${Number(seconds.toFixed(1))}s`;
+    const short = seconds => t('clip.seconds', { seconds: number(seconds) });
     const value = (object, name) => object[name] ?? object[name[0].toLowerCase() + name.slice(1)];
 
     const MP4_PREVIEW = 'video/mp4; codecs="avc1.42E01E, mp4a.40.2"';
@@ -23,7 +24,7 @@
     function previewFormat(video) {
         if (video.canPlayType(MP4_PREVIEW)) return 'mp4';
         if (video.canPlayType(WEBM_PREVIEW)) return 'webm';
-        throw new Error('This client cannot play either supported preview format. Open the clip editor in a browser with H.264/AAC or VP8/Opus playback.');
+        throw new Error(t('clip.unsupportedFormat'));
     }
 
     function clipUrl(state, id, download = false) {
@@ -70,7 +71,7 @@
                 const body = await response.text();
                 let message = body;
                 try { const data = JSON.parse(body); message = typeof data === 'string' ? data : data.detail || data.title; } catch (_) { }
-                throw new Error(message || `Clip request failed (${response.status}).`);
+                throw new Error(message || t('clip.requestFailed', { status: response.status }));
             }
             const data = await response.json();
             const result = {
@@ -80,7 +81,7 @@
             if (current !== state) { release(state, result.id); throw new DOMException('Closed', 'AbortError'); }
             return result;
         } catch (error) {
-            if (timedOut) throw new Error('The server did not finish preparing the clip in time. Retry, or check the Jellyfin server log.');
+            if (timedOut) throw new Error(t('clip.renderTimeout'));
             throw error;
         } finally {
             clearTimeout(timer);
@@ -110,10 +111,10 @@
         $('#jfc-start').min = windowStart;
         $('#jfc-start').max = windowEnd;
         $('#jfc-duration').max = windowEnd - state.start;
-        $('.jfc-start-time').textContent = `Starts at ${time(state.start)}`;
-        $('.jfc-end-time').textContent = `Ends at ${time(state.end)}`;
-        $('.jfc-duration').textContent = `${short(duration)} selected`;
-        $('.jfc-export-label').textContent = state.exporting ? 'Creating clip…' : `Create ${short(duration)} clip`;
+        $('.jfc-start-time').textContent = t('clip.startsAt', { time: time(state.start) });
+        $('.jfc-end-time').textContent = t('clip.endsAt', { time: time(state.end) });
+        $('.jfc-duration').textContent = t('clip.selected', { duration: short(duration) });
+        $('.jfc-export-label').textContent = state.exporting ? t('clip.creating') : t('clip.create', { duration: short(duration) });
         $('.jfc-export').disabled = !state.ready || state.busy || !!state.subtitleRequest || duration <= 0;
         $('.jfc-play').disabled = !state.ready || state.busy || duration <= 0;
         $('.jfc-controls').disabled = state.busy || !state.ready;
@@ -176,7 +177,7 @@
         const glyph = state.$('.jfc-play .jfc-icon');
         const name = paused ? 'play_arrow' : 'pause';
         if (glyph.textContent !== name) glyph.textContent = name;
-        state.$('.jfc-play').setAttribute('aria-label', paused ? 'Preview selected clip' : 'Pause clip preview');
+        state.$('.jfc-play').setAttribute('aria-label', t(paused ? 'clip.previewPlay' : 'clip.previewPause'));
     }
 
     function setSelection(state, field, input) {
@@ -293,7 +294,7 @@
         const request = new AbortController();
         state.subtitleRequest = request;
         const timer = setTimeout(() => request.abort(), RENDER_TIMEOUT);
-        status(state, 'Loading selected subtitles…'); update(state);
+        status(state, t('clip.loadingSubtitles')); update(state);
         try {
             const response = await fetch(`${state.context.server}/Screenshot/clips/${encodeURIComponent(preview.id)}/subtitles/${state.context.subtitleStreamIndex}`, {
                 headers: state.context.authorizationHeaders, signal: request.signal
@@ -305,15 +306,15 @@
                 prepare(state);
                 return;
             }
-            if (!response.ok) throw new Error('Could not load preview subtitles. Toggle them on again to retry.');
+            if (!response.ok) throw new Error(t('clip.subtitlesFailed'));
             const blob = await response.blob();
             if (current !== state || state.preview !== preview || request.signal.aborted) return;
             const track = document.createElement('track');
-            track.kind = 'subtitles'; track.label = 'Selected subtitles';
+            track.kind = 'subtitles'; track.label = t('clip.subtitleTrack');
             state.subtitleUrl = URL.createObjectURL(new Blob([blob], { type: 'text/vtt' }));
             state.subtitleTrack = track;
             await new Promise((resolve, reject) => {
-                const abort = () => finish(new Error('Subtitle loading was cancelled or timed out. Toggle them on again to retry.'));
+                const abort = () => finish(new Error(t('clip.subtitlesCancelled')));
                 const loadTimer = setTimeout(abort, MEDIA_TIMEOUT);
                 function finish(error) {
                     clearTimeout(loadTimer);
@@ -322,7 +323,7 @@
                     if (error) reject(error); else resolve();
                 }
                 track.onload = () => finish();
-                track.onerror = () => finish(new Error('This client could not read the preview subtitles. Toggle them on again to retry.'));
+                track.onerror = () => finish(new Error(t('clip.subtitlesUnreadable')));
                 request.signal.addEventListener('abort', abort, { once: true });
                 track.src = state.subtitleUrl;
                 state.video.append(track);
@@ -343,7 +344,7 @@
             if (current !== state || state.preview !== preview || state.subtitleRequest !== request) return;
             clearSubtitles(state);
             checkbox.checked = false;
-            status(state, error.name === 'AbortError' ? 'Subtitle loading timed out. Toggle them on again to retry.' : error.message, true);
+            status(state, error.name === 'AbortError' ? t('clip.subtitlesTimeout') : error.message, true);
         } finally {
             clearTimeout(timer);
             if (state.subtitleRequest === request) state.subtitleRequest = null;
@@ -365,16 +366,16 @@
         state.preview = null;
         state.$('.jfc-loading').hidden = false;
         state.$('.jfc-spinner').hidden = false;
-        state.$('.jfc-loading-label').textContent = 'Preparing your preview…';
+        state.$('.jfc-loading-label').textContent = t('clip.preparingPreview');
         state.$('.jfc-retry').hidden = true;
         const started = Date.now();
         state.preparationTimer = setInterval(() => {
             if (current !== state) return;
             const seconds = Math.floor((Date.now() - started) / 1000);
-            state.$('.jfc-loading-label').textContent = `Preparing your preview… ${seconds}s`;
-            if (seconds >= 15) status(state, 'The server is still rendering the preview. High-resolution video and subtitles can take longer. You can cancel at any time.');
+            state.$('.jfc-loading-label').textContent = t('clip.preparingPreviewElapsed', { seconds });
+            if (seconds >= 15) status(state, t('clip.stillRendering'));
         }, 1000);
-        status(state, 'The server is rendering the available video around your moment.');
+        status(state, t('clip.rendering'));
         update(state);
         if (previous) await release(state, previous.id);
         if (current !== state) return;
@@ -383,14 +384,14 @@
             const preview = await create(state, true);
             state.preview = preview;
             if (Math.abs(preview.start - state.windowStart) > .001 || Math.abs(preview.end - state.windowEnd) > .001) {
-                throw new Error('The preview does not match the requested clipping window. Reload the client and try again.');
+                throw new Error(t('clip.previewMismatch'));
             }
             clearInterval(state.preparationTimer);
-            state.$('.jfc-loading-label').textContent = 'Loading preview video…';
-            status(state, 'The server finished preparing the preview. Loading it in this client…');
+            state.$('.jfc-loading-label').textContent = t('clip.loadingPreview');
+            status(state, t('clip.previewPrepared'));
             state.mediaTimer = setTimeout(() => {
                 if (current !== state || state.preview !== preview || state.ready) return;
-                failedPreview(state, 'The preview was created, but this client could not load it within 30 seconds. Retry the preview or try Jellyfin in a web browser.');
+                failedPreview(state, t('clip.previewLoadTimeout'));
                 state.video.removeAttribute('src'); state.video.load();
             }, MEDIA_TIMEOUT);
             state.video.src = clipUrl(state, preview.id);
@@ -406,7 +407,7 @@
         state.busy = false; state.ready = false;
         state.$('.jfc-loading').hidden = false;
         state.$('.jfc-spinner').hidden = true;
-        state.$('.jfc-loading-label').textContent = 'Preview unavailable';
+        state.$('.jfc-loading-label').textContent = t('clip.previewUnavailable');
         state.$('.jfc-retry').hidden = false;
         status(state, message, true);
         update(state);
@@ -415,7 +416,7 @@
     async function exportClip(state) {
         if (state.busy || state.subtitleRequest || !state.ready || state.end <= state.start) return;
         state.video.pause(); state.busy = true; state.exporting = true;
-        status(state, 'Creating your clip… You can cancel by closing the editor.');
+        status(state, t('clip.exporting'));
         update(state);
         try {
             if (state.download) await release(state, state.download.id);
@@ -425,13 +426,13 @@
             state.download = result;
             const url = clipUrl(state, result.id, true);
             const link = document.createElement('a');
-            link.href = url; link.download = result.filename; link.textContent = 'Download clip again'; link.className = 'jfc-download';
-            status(state, 'Your clip is ready. ');
+            link.href = url; link.download = result.filename; link.textContent = t('clip.downloadAgain'); link.className = 'jfc-download';
+            status(state, `${t('clip.ready')} `);
             state.$('.jfc-status').append(link);
             if (window.jmpNative?.startDownload) window.jmpNative.startDownload(url);
             else link.click();
         } catch (error) {
-            if (current === state && error.name !== 'AbortError') status(state, error.message || 'Could not create the clip.', true);
+            if (current === state && error.name !== 'AbortError') status(state, error.message || t('clip.exportFailed'), true);
         } finally {
             state.busy = false; state.exporting = false;
             if (current === state) update(state);
@@ -470,25 +471,25 @@
             const dialog = document.createElement('dialog');
             dialog.id = 'jfclip-editor'; dialog.setAttribute('aria-labelledby', 'jfc-title');
             dialog.innerHTML = `
-                <header class="jfc-header"><div><div class="jfc-name"></div><h1 id="jfc-title">Create a clip</h1></div><button class="jfc-close" aria-label="Close clip editor">${icon('close')}</button></header>
+                <header class="jfc-header"><div><div class="jfc-name"></div><h1 id="jfc-title">${html('clip.title')}</h1></div><button class="jfc-close" aria-label="${html('clip.closeEditor')}">${icon('close')}</button></header>
                 <div class="jfc-body"><div class="jfc-preview">
                     <video data-clip-preview playsinline preload="auto"></video>
-                    <button class="jfc-play" aria-label="Preview selected clip" disabled>${icon('play_arrow')}</button>
-                    <button class="jfc-mute" aria-label="Mute clip preview">${icon('volume_up')}</button><span class="jfc-preview-time"><span class="jfc-preview-time-label">Position</span><span class="jfc-preview-time-value"></span></span>
-                    <div class="jfc-loading"><span class="jfc-spinner" aria-hidden="true"></span><span class="jfc-loading-label">Preparing your preview…</span><button class="jfc-retry" hidden>Retry preview</button></div>
-                </div><div class="jfc-heading"><span>Trim anywhere in this window. Requested at <strong class="jfc-moment"></strong>.</span><span class="jfc-duration"></span></div>
-                <fieldset class="jfc-controls" disabled aria-label="Clip selection"><div class="jfc-timeline-section">
-                    <div class="jfc-scale"><span class="jfc-window-start"></span><span class="jfc-window-end"></span><span class="jfc-anchor-label">Your moment</span></div>
-                    <div class="jfc-timeline"><div class="jfc-frames" aria-hidden="true"></div><div class="jfc-left"></div><div class="jfc-right"></div><div class="jfc-selection"></div><div class="jfc-anchor"></div><button class="jfc-scrubber" role="slider" aria-label="Preview position" aria-orientation="horizontal"></button><div class="jfc-playhead"></div>
-                        <button class="jfc-handle jfc-start" role="slider" aria-label="Clip start"></button><button class="jfc-handle jfc-end" role="slider" aria-label="Clip end"></button></div>
-                    <p class="jfc-hint">Drag or scroll the handles to trim. Click or drag the filmstrip to scrub. <button class="jfc-thumbnail-retry" hidden>Retry thumbnails</button></p></div>
-                    <div class="jfc-position-actions"><button data-jfc-set-position="start" title="Set clip start to the current preview position">${icon('first_page')}<span>Set start here</span></button><button data-jfc-set-position="end" title="Set clip end to the current preview position">${icon('last_page')}<span>Set end here</span></button></div>
+                    <button class="jfc-play" aria-label="${html('clip.previewPlay')}" disabled>${icon('play_arrow')}</button>
+                    <button class="jfc-mute" aria-label="${html('clip.mute')}">${icon('volume_up')}</button><span class="jfc-preview-time"><span class="jfc-preview-time-label">${html('clip.position')}</span><span class="jfc-preview-time-value"></span></span>
+                    <div class="jfc-loading"><span class="jfc-spinner" aria-hidden="true"></span><span class="jfc-loading-label">${html('clip.preparingPreview')}</span><button class="jfc-retry" hidden>${html('clip.retryPreview')}</button></div>
+                </div><div class="jfc-heading"><span>${html('clip.windowHint', { moment: '<strong class="jfc-moment"></strong>' })}</span><span class="jfc-duration"></span></div>
+                <fieldset class="jfc-controls" disabled aria-label="${html('clip.selectionLabel')}"><div class="jfc-timeline-section">
+                    <div class="jfc-scale"><span class="jfc-window-start"></span><span class="jfc-window-end"></span><span class="jfc-anchor-label">${html('clip.yourMoment')}</span></div>
+                    <div class="jfc-timeline"><div class="jfc-frames" aria-hidden="true"></div><div class="jfc-left"></div><div class="jfc-right"></div><div class="jfc-selection"></div><div class="jfc-anchor"></div><button class="jfc-scrubber" role="slider" aria-label="${html('clip.previewPosition')}" aria-orientation="horizontal"></button><div class="jfc-playhead"></div>
+                        <button class="jfc-handle jfc-start" role="slider" aria-label="${html('clip.handleStart')}"></button><button class="jfc-handle jfc-end" role="slider" aria-label="${html('clip.handleEnd')}"></button></div>
+                    <p class="jfc-hint">${html('clip.trimHint')} <button class="jfc-thumbnail-retry" hidden>${html('clip.retryThumbnails')}</button></p></div>
+                    <div class="jfc-position-actions"><button data-jfc-set-position="start" title="${html('clip.setStartTitle')}">${icon('first_page')}<span>${html('clip.setStart')}</span></button><button data-jfc-set-position="end" title="${html('clip.setEndTitle')}">${icon('last_page')}<span>${html('clip.setEnd')}</span></button></div>
                     <div class="jfc-fields">
-                        <div class="jfc-field"><label for="jfc-start">Starting point</label><div class="jfc-input-row"><button data-jfc-adjust="start:-5" aria-label="Move start 5 seconds earlier">−</button><input id="jfc-start" type="number" min="0" max="60" step="0.1"><span class="jfc-unit">sec</span><button data-jfc-adjust="start:5" aria-label="Move start 5 seconds later">+</button></div><span class="jfc-boundary jfc-start-time"></span></div>
-                        <div class="jfc-field"><label for="jfc-duration">Duration</label><div class="jfc-input-row"><button data-jfc-adjust="duration:-5" aria-label="Shorten duration by 5 seconds">−</button><input id="jfc-duration" type="number" min="0" max="60" step="0.1"><span class="jfc-unit">sec</span><button data-jfc-adjust="duration:5" aria-label="Extend duration by 5 seconds">+</button></div><span class="jfc-boundary jfc-end-time"></span></div>
-                    </div><div class="jfc-presets"><button data-jfc-preset="30,0">Last 30s</button><button data-jfc-preset="15,15">±15s</button><button data-jfc-preset="30,30">±30s</button><button data-jfc-preset="60,60">Full window</button></div>
+                        <div class="jfc-field"><label for="jfc-start">${html('clip.startingPoint')}</label><div class="jfc-input-row"><button data-jfc-adjust="start:-5" aria-label="${html('clip.startEarlier')}">−</button><input id="jfc-start" type="number" min="0" max="60" step="0.1"><span class="jfc-unit">${html('clip.secondsUnit')}</span><button data-jfc-adjust="start:5" aria-label="${html('clip.startLater')}">+</button></div><span class="jfc-boundary jfc-start-time"></span></div>
+                        <div class="jfc-field"><label for="jfc-duration">${html('clip.duration')}</label><div class="jfc-input-row"><button data-jfc-adjust="duration:-5" aria-label="${html('clip.shorten')}">−</button><input id="jfc-duration" type="number" min="0" max="60" step="0.1"><span class="jfc-unit">${html('clip.secondsUnit')}</span><button data-jfc-adjust="duration:5" aria-label="${html('clip.extend')}">+</button></div><span class="jfc-boundary jfc-end-time"></span></div>
+                    </div><div class="jfc-presets"><button data-jfc-preset="30,0">${html('clip.presetLast30')}</button><button data-jfc-preset="15,15">${html('clip.presetAround15')}</button><button data-jfc-preset="30,30">${html('clip.presetAround30')}</button><button data-jfc-preset="60,60">${html('clip.presetFull')}</button></div>
                 </fieldset></div>
-                <footer class="jfc-footer"><label class="jfc-subs"><input id="jfc-subtitles" type="checkbox">Include selected subtitles</label><div class="jfc-actions"><span class="jfc-format">MP4</span><button class="jfc-cancel">Cancel</button><button class="jfc-export" disabled>${icon('content_cut')}<span class="jfc-export-label"></span></button></div></footer><p class="jfc-status" role="status" aria-live="polite"></p>`;
+                <footer class="jfc-footer"><label class="jfc-subs"><input id="jfc-subtitles" type="checkbox">${html('clip.includeSubtitles')}</label><div class="jfc-actions"><span class="jfc-format">MP4</span><button class="jfc-cancel">${html('common.cancel')}</button><button class="jfc-export" disabled>${icon('content_cut')}<span class="jfc-export-label"></span></button></div></footer><p class="jfc-status" role="status" aria-live="polite"></p>`;
             const maxBefore = Math.min(60, context.anchorTicks / TICKS);
             const maxAfter = Math.min(60, (context.runtimeTicks - context.anchorTicks) / TICKS);
             const anchor = context.anchorTicks / TICKS;
@@ -517,15 +518,15 @@
                     const start = state.start - state.preview.start;
                     const end = state.end - state.preview.start;
                     if (state.video.currentTime < start || state.video.currentTime >= end - .04) state.video.currentTime = Math.max(0, start);
-                    try { await state.video.play(); } catch (error) { if (current === state && error.name !== 'AbortError') status(state, 'The preview could not play. Try reloading it.', true); }
+                    try { await state.video.play(); } catch (error) { if (current === state && error.name !== 'AbortError') status(state, t('clip.previewPlayFailed'), true); }
                 }
             };
-            state.$('.jfc-mute').onclick = () => { state.video.muted = !state.video.muted; state.$('.jfc-mute').innerHTML = icon(state.video.muted ? 'volume_off' : 'volume_up'); state.$('.jfc-mute').setAttribute('aria-label', state.video.muted ? 'Unmute clip preview' : 'Mute clip preview'); };
+            state.$('.jfc-mute').onclick = () => { state.video.muted = !state.video.muted; state.$('.jfc-mute').innerHTML = icon(state.video.muted ? 'volume_off' : 'volume_up'); state.$('.jfc-mute').setAttribute('aria-label', t(state.video.muted ? 'clip.unmute' : 'clip.mute')); };
             state.video.addEventListener('loadedmetadata', () => {
                 if (current !== state || !state.preview) return;
                 clearPreparationTimers(state);
                 state.busy = false; state.ready = true; state.$('.jfc-loading').hidden = true;
-                status(state, state.bitmapSubtitles && state.$('#jfc-subtitles').checked ? 'Image-based subtitles are burned into this preview; toggling them requires rendering.' : '');
+                status(state, state.bitmapSubtitles && state.$('#jfc-subtitles').checked ? t('clip.bitmapSubtitles') : '');
                 update(state, true); thumbnails(state, state.preview);
                 if (!state.bitmapSubtitles && state.$('#jfc-subtitles').checked) toggleSubtitles(state);
             });
@@ -540,8 +541,8 @@
                     return;
                 }
                 const message = code === 3 || code === 4
-                    ? `This client could not decode the ${state.previewFormat.toUpperCase()} preview. Try updating the client or opening the editor in a web browser.`
-                    : 'The preview could not be downloaded. Check the server connection and sign-in, then retry.';
+                    ? t('clip.previewDecodeFailed', { format: state.previewFormat.toUpperCase() })
+                    : t('clip.previewDownloadFailed');
                 failedPreview(state, message);
             });
             for (const event of ['play', 'pause', 'seeked', 'timeupdate']) state.video.addEventListener(event, () => {
@@ -621,7 +622,7 @@
             dialog.showModal(); state.$('.jfc-close').focus();
             update(state); prepare(state);
         } catch (error) {
-            if (ticket === generation) { close(); window.ScreenshotCaptureTools.showToast(error.message || 'Could not open the clip editor.'); }
+            if (ticket === generation) { close(); window.ScreenshotCaptureTools.showToast(error.message || t('clip.openFailed')); }
         } finally { if (ticket === generation) opening = false; }
     }
     window.JellyfinClip = { open, close };

@@ -27,6 +27,11 @@ subtitle_gate = threading.Event(); subtitle_gate.set()
 settings = {'anchor':70,'runtime':200,'fail':False,'delay':False}
 item = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 
+def bundle():
+    # Mirrors ScriptBundle.Build(): translations first, then the i18n runtime and scripts.
+    locales = ',\n'.join(f'{json.dumps(path.stem)}: {path.read_text(encoding="utf-8")}' for path in sorted((assets/'locales').glob('*.json')))
+    return '\n;\n'.join([f'window.ScreenshotCaptureLocales = {{\n{locales}\n}};'] + [(assets/name).read_text(encoding='utf-8') for name in ('i18n.js', 'screenshot.js', 'clipping.js')])
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args): pass
     def send(self, data, mime='application/json', code=200):
@@ -60,7 +65,7 @@ class Handler(BaseHTTPRequestHandler):
             <script src="/jellyfin/Screenshot/script"></script></body></html>""", 'text/html')
         elif path == '/jellyfin/Screenshot/capture':
             if self.authorize(media=True): self.send(b'fixture-jpeg', 'image/jpeg')
-        elif path == '/jellyfin/Screenshot/script': self.send((assets/'screenshot.js').read_text()+'\n;\n'+(assets/'clipping.js').read_text(), 'application/javascript')
+        elif path == '/jellyfin/Screenshot/script': self.send(bundle(), 'application/javascript')
         elif path == '/jellyfin/Screenshot/clipping.css': self.send((assets/'clipping.css').read_bytes(), 'text/css')
         elif path == '/jellyfin/Sessions':
             if not self.authorize(): return

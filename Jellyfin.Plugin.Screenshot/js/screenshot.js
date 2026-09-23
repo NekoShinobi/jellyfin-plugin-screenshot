@@ -12,6 +12,7 @@
     const BTN_ID = 'screenshot-capture-btn';
     const DIALOG_ID = 'screenshot-capture-dialog';
     const TICKS_PER_SECOND = 10_000_000;
+    const { t, html } = window.ScreenshotCaptureI18n;
     let closeCaptureDialog = null;
 
     /**
@@ -83,12 +84,12 @@
         const btn = document.createElement('button');
         btn.id = BTN_ID;
         btn.type = 'button';
-        btn.setAttribute('aria-label', 'Take screenshot');
+        btn.setAttribute('aria-label', t('screenshot.buttonLabel'));
         btn.setAttribute('aria-haspopup', 'dialog');
         btn.setAttribute('aria-expanded', 'false');
         btn.setAttribute('is', 'paper-icon-button-light');
         btn.className = 'autoSize paper-icon-button-light';
-        btn.title = 'Screenshot';
+        btn.title = t('screenshot.button');
         btn.innerHTML =
             '<span class="largePaperIconButton material-icons" aria-hidden="true">photo_camera</span>';
 
@@ -115,8 +116,8 @@
         button.type = 'button';
         button.className = 'autoSize paper-icon-button-light';
         button.setAttribute('is', 'paper-icon-button-light');
-        button.setAttribute('aria-label', 'Create a clip');
-        button.title = 'Create a clip';
+        button.setAttribute('aria-label', t('clip.button'));
+        button.title = t('clip.button');
         button.innerHTML = '<span class="largePaperIconButton material-icons" aria-hidden="true">content_cut</span>';
         button.addEventListener('click', event => {
             event.preventDefault();
@@ -130,23 +131,23 @@
     async function getClipContext() {
         const native = window._mpvVideoPlayerInstance;
         const itemId = native?._currentPlayOptions?.item?.Id || getCurrentItemId();
-        if (!itemId) throw new Error('Could not identify the playing video.');
+        if (!itemId) throw new Error(t('clip.noItem'));
         // Pause before any network calls so the captured anchor cannot drift.
         const video = document.querySelector('video:not([data-clip-preview])');
         if (window.jmpNative && native?.pause) native.pause();
         else video?.pause();
         const session = await getCurrentSession(itemId);
         if (!session?.NowPlayingItem?.Id || session.NowPlayingItem.Id.toLowerCase() !== String(itemId).toLowerCase()) {
-            throw new Error('The current playback session is unavailable. Try again in a moment.');
+            throw new Error(t('clip.noSession'));
         }
         const anchorTicks = await getPositionTicks(itemId, session);
         const runtimeTicks = Number(session.NowPlayingItem.RunTimeTicks);
         if (!Number.isSafeInteger(runtimeTicks) || runtimeTicks <= 0
             || !Number.isSafeInteger(anchorTicks) || anchorTicks < 0 || anchorTicks > runtimeTicks) {
-            throw new Error('Clipping requires a video with a known playback position and duration.');
+            throw new Error(t('clip.unknownPosition'));
         }
         return {
-            itemId, anchorTicks, runtimeTicks, name: session.NowPlayingItem.Name || 'Video',
+            itemId, anchorTicks, runtimeTicks, name: session.NowPlayingItem.Name || t('clip.defaultName'),
             mediaSourceId: session.PlayState?.MediaSourceId,
             audioStreamIndex: session.PlayState?.AudioStreamIndex,
             subtitleStreamIndex: session.PlayState?.SubtitleStreamIndex,
@@ -185,22 +186,22 @@
             container.innerHTML = `
                 <div class="jfs-panel" role="dialog" aria-modal="true" aria-labelledby="screenshot-capture-title">
                     <header class="jfs-header">
-                        <div><div class="jfs-eyebrow">SCREENSHOT</div><h1 id="screenshot-capture-title">Take screenshot</h1></div>
-                        <button type="button" class="jfs-close" data-capture-close aria-label="Close screenshot menu"><span class="material-icons" aria-hidden="true">close</span></button>
+                        <div><div class="jfs-eyebrow">${html('screenshot.eyebrow')}</div><h1 id="screenshot-capture-title">${html('screenshot.title')}</h1></div>
+                        <button type="button" class="jfs-close" data-capture-close aria-label="${html('screenshot.closeMenu')}"><span class="material-icons" aria-hidden="true">close</span></button>
                     </header>
                     <div class="jfs-options">
                         <button type="button" class="jfs-option" data-capture-mode="with-subtitles">
                             <span class="jfs-option-icon material-icons" aria-hidden="true">closed_caption</span>
-                            <span class="jfs-option-copy"><span class="jfs-option-title">With subtitles</span><span class="jfs-option-description">Include the selected subtitle track.</span></span>
+                            <span class="jfs-option-copy"><span class="jfs-option-title">${html('screenshot.withSubtitles')}</span><span class="jfs-option-description">${html('screenshot.withSubtitlesDescription')}</span></span>
                             <span class="jfs-option-arrow material-icons" aria-hidden="true">arrow_forward</span>
                         </button>
                         <button type="button" class="jfs-option" data-capture-mode="without-subtitles">
                             <span class="jfs-option-icon material-icons" aria-hidden="true">photo_camera</span>
-                            <span class="jfs-option-copy"><span class="jfs-option-title">Without subtitles</span><span class="jfs-option-description">Capture the video image only.</span></span>
+                            <span class="jfs-option-copy"><span class="jfs-option-title">${html('screenshot.withoutSubtitles')}</span><span class="jfs-option-description">${html('screenshot.withoutSubtitlesDescription')}</span></span>
                             <span class="jfs-option-arrow material-icons" aria-hidden="true">arrow_forward</span>
                         </button>
                     </div>
-                    <footer class="jfs-footer"><span class="jfs-format">JPEG</span><button type="button" class="jfs-cancel" data-capture-close>Cancel</button></footer>
+                    <footer class="jfs-footer"><span class="jfs-format">JPEG</span><button type="button" class="jfs-cancel" data-capture-close>${html('common.cancel')}</button></footer>
                 </div>`;
             document.getElementById(BTN_ID)?.setAttribute('aria-expanded', 'true');
 
@@ -269,7 +270,7 @@
     // both Jellyfin 10.11 and 12. Use the signed-in client's token and device identity.
     function getAuthorizationHeaders() {
         const token = ApiClient.accessToken();
-        if (!token) throw new Error('Please sign in to Jellyfin again to capture media.');
+        if (!token) throw new Error(t('common.signInAgain'));
         const quote = value => JSON.stringify(String(value));
         return { Authorization: `MediaBrowser Token=${quote(token)}, DeviceId=${quote(ApiClient.deviceId())}` };
     }
@@ -453,7 +454,7 @@
         };
         const close = document.createElement('button');
         close.type = 'button';
-        close.setAttribute('aria-label', 'Dismiss notification');
+        close.setAttribute('aria-label', t('common.dismissNotification'));
         close.style.cssText = 'position:absolute;right:.4em;top:.4em;display:grid;place-items:center;width:30px;height:30px;padding:6px;border:0;border-radius:4px;background:transparent;color:inherit;cursor:pointer';
         close.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 3l10 10M13 3L3 13" fill="none" stroke="currentColor" stroke-width="1.5"/></svg>';
         close.onclick = dismiss;
@@ -485,11 +486,11 @@
         const blobUrl = URL.createObjectURL(blob);
         // Keep a real, clickable save action after the async render. Browsers may
         // ignore the automatic click; retrying must not render the image again.
-        const toast = showFallbackToast(`Screenshot ready: ${filename}.\nCheck your browser’s downloads, or save it here.`, 120_000);
+        const toast = showFallbackToast(t('screenshot.ready', { filename }), 120_000);
         const link = document.createElement('a');
         link.href = blobUrl;
         link.download = filename;
-        link.textContent = 'Download screenshot';
+        link.textContent = t('screenshot.download');
         link.style.cssText = 'display:inline-block;margin-top:.5em;color:inherit;text-decoration:underline;cursor:pointer;pointer-events:auto';
         toast.append(document.createElement('br'), link);
         const release = () => {
@@ -559,7 +560,7 @@
 
         const subtitleStreamIndex = session?.PlayState?.SubtitleStreamIndex;
         if (includeSubtitles && !(Number.isInteger(subtitleStreamIndex) && subtitleStreamIndex >= 0)) {
-            const message = 'No subtitle track is currently selected.';
+            const message = t('screenshot.noSubtitleTrack');
             console.warn(LOG_PREFIX, message);
             if (window.Dashboard?.alert) {
                 window.Dashboard.alert(message);
@@ -587,34 +588,34 @@
 
         try {
             if (typeof window.jmpNative?.startDownloadWithResult === 'function') {
-                await showToast(`Preparing screenshot: ${filename}`);
+                await showToast(t('screenshot.preparing', { filename }));
                 const result = await downloadWithResult(url);
                 if (result.status === 'complete') {
                     if (typeof result.fullPath === 'string' && result.fullPath.length > 0) {
                         // Keep long paths readable, including spaces, backslashes and Unicode.
-                        showFallbackToast(`Screenshot saved to:\n${result.fullPath}`, 10_000);
+                        showFallbackToast(t('screenshot.savedTo', { path: result.fullPath }), 10_000);
                     } else {
-                        showToast('Screenshot saved. This client did not report the saved location.');
+                        showToast(t('screenshot.savedUnknownLocation'));
                     }
                 } else if (result.status === 'cancelled') {
-                    showToast('Screenshot save cancelled.');
+                    showToast(t('screenshot.saveCancelled'));
                 } else if (result.status === 'failed') {
-                    showToast('Screenshot could not be saved. Check the destination and try again.');
+                    showToast(t('screenshot.saveFailed'));
                 } else if (result.status === 'unknown') {
-                    showToast('Screenshot save status is unavailable. Check your downloads.');
+                    showToast(t('screenshot.saveStatusUnknown'));
                 }
             } else if (window.jmpNative && window.jmpNative.startDownload) {
                 // CEF desktop client — use native download API, no frame involved
                 window.jmpNative.startDownload(url);
-                showToast(`Screenshot download started: ${filename}. This Desktop version does not report the saved path.`);
+                showToast(t('screenshot.downloadStarted', { filename }));
                 console.log(LOG_PREFIX, '✓ startDownload called (CEF path)');
             } else {
-                await showToast(`Creating screenshot as ${filename}`);
+                await showToast(t('screenshot.creating', { filename }));
 
                 const response = await fetch(url);
                 if (!response.ok) {
                     const detail = await response.text();
-                    throw new Error(detail || `Screenshot request failed (${response.status})`);
+                    throw new Error(detail || t('screenshot.requestFailed', { status: response.status }));
                 }
 
                 downloadBrowserScreenshot(await response.blob(), filename);
@@ -622,7 +623,7 @@
             }
         } catch (err) {
             console.error(LOG_PREFIX, 'Capture failed:', err);
-            showToast(`Screenshot failed: ${err.message || err}`);
+            showToast(t('screenshot.failed', { error: err.message || err }));
         }
     }
 

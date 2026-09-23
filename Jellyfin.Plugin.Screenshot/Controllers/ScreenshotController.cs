@@ -8,6 +8,7 @@ using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.MediaEncoding;
 using MediaBrowser.Model.Dto;
+using Jellyfin.Plugin.Screenshot.Helpers;
 using Jellyfin.Plugin.Screenshot.Services;
 using MediaBrowser.Model.Entities;
 using Microsoft.AspNetCore.Authorization;
@@ -64,18 +65,10 @@ public class ScreenshotController : ControllerBase
     [AllowAnonymous]
     public ActionResult GetScript()
     {
-        var assembly = GetType().Assembly;
-        var prefix = typeof(Plugin).Namespace;
-        var parts = new List<string>();
-        foreach (var name in new[] { "screenshot.js", "clipping.js" })
-        {
-            using var stream = assembly.GetManifestResourceStream($"{prefix}.js.{name}");
-            if (stream is null) return NotFound();
-            using var reader = new StreamReader(stream);
-            parts.Add(reader.ReadToEnd());
-        }
+        var script = ScriptBundle.Build();
+        if (script is null) return NotFound();
         Response.Headers.CacheControl = "no-cache, must-revalidate";
-        return Content(string.Join("\n;\n", parts), "application/javascript", System.Text.Encoding.UTF8);
+        return Content(script, "application/javascript", System.Text.Encoding.UTF8);
     }
 
     /// <summary>Serves the isolated clip editor stylesheet.</summary>
