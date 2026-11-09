@@ -93,5 +93,21 @@
   "clip.presetAround15": "±15 秒",
   "clip.presetAround30": "±30 秒",
   "clip.presetFull": "整个范围",
-  "clip.includeSubtitles": "包含所选字幕"
+  "clip.includeSubtitles": "包含所选字幕",
+  "cover.title": "Use screenshot as cover",
+  "cover.targetLabel": "Set cover for:",
+  "cover.movie": "Movie",
+  "cover.series": "Series",
+  "cover.episode": "Episode",
+  "cover.cancel": "Cancel",
+  "cover.download": "Download screenshot",
+  "cover.save": "Save as cover",
+  "cover.saving": "Please wait ...",
+  "cover.existingConfirm": "A cover already exists for \"{name}\".\n\nA backup download has been requested. Do you really want to replace the existing cover?",
+  "cover.backupSuffix": "-cover-backup.jpg",
+  "cover.success": "The cover was saved successfully.",
+  "cover.itemLoadFailed": "Could not load item information ({status}).",
+  "cover.imageLoadFailed": "Could not load existing cover ({status}).",
+  "cover.imageProcessFailed": "Could not process screenshot.",
+  "cover.uploadFailed": "Could not save cover ({status})."
 }
